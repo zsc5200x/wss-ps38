@@ -467,12 +467,22 @@ class CrownMemberMonitor:
                     self._clients.pop(identity, None)
                     if self._update_state(account, session, "expired", "会员站点确认会话失效，正在尝试重新登录"):
                         self._next_due[identity] = now
-                        self._start_relogin(account, session)
+                        if getattr(self.auth, "shared_browser_configured", False):
+                            # A visible Crown tab may already contain the login
+                            # that replaced this expired saved session.
+                            self._request_browser_check(account, session)
+                        else:
+                            self._start_relogin(account, session)
                 except MemberSessionConflict:
                     self._clients.pop(identity, None)
                     if self._update_state(account, session, "session_received",
                                           "皇冠提示重复登录，请退出其他设备会话后重新登录"):
                         self._next_due[identity] = now + 300
+                        if getattr(self.auth, "shared_browser_configured", False):
+                            # The old saved UID usually lost to the user's newer
+                            # manual login. Reconcile with the visible tab before
+                            # asking the user to log in again.
+                            self._request_browser_check(account, session)
                 except MemberUnavailable:
                     self._clients.pop(identity, None)
                     count = self._failures.get(identity, 0) + 1
@@ -484,7 +494,12 @@ class CrownMemberMonitor:
                     message = "水位在线检查暂时失败，保留已保存会话并稍后重试"
                     if not self._update_state(account, session, status, message):
                         continue
-                    if count >= 3:
+                    # In the shared Chrome setup, an existing Crown tab may
+                    # already contain a newer manual login. Inspect that tab on
+                    # the first transient failure instead of waiting for three
+                    # failed heartbeats and continuing to replay stale state.
+                    if count >= 3 or (count >= 1
+                                      and getattr(self.auth, "shared_browser_configured", False)):
                         self._request_browser_check(account, session)
                 except (ValueError, KeyError):
                     self._clients.pop(identity, None)

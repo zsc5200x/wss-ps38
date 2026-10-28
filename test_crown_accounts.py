@@ -10,6 +10,7 @@ from unittest.mock import patch
 import crown_runtime
 from crown_local.backend.auth import (
     AuthService,
+    _SessionChanged,
     _allow_insecure_certificate,
     _crown_ip_redirect_origin,
 )
@@ -269,6 +270,27 @@ class CrownAccountTests(unittest.TestCase):
         self.assertFalse(service._adopt_member_page_identity(job, FakeFrame()))
         self.assertEqual(job.uid, "existing-uid")
 
+    def test_visible_tab_sync_can_adopt_a_new_login_uid(self):
+        class FakeFrame:
+            url = "https://m829.crw066.com/"
+
+            def evaluate(self, _script):
+                return {"uid": "new-uid", "ver": "4.1.2", "langx": "zh-cn", "ltype": "1"}
+
+        service = AuthService.__new__(AuthService)
+        job = SimpleNamespace(
+            uid="existing-uid", member_authenticated=True,
+            member_origin="https://m829.crw066.com", member_protocol={},
+            member_resume_query={}, resume_url="",
+            account={"kind": "crown_odds", "base_url": "https://hga038.com", "username": "member"},
+        )
+
+        self.assertTrue(service._adopt_member_page_identity(
+            job, FakeFrame(), allow_uid_change=True,
+        ))
+        self.assertEqual(job.uid, "new-uid")
+        self.assertEqual(job.member_protocol["origin"], "https://m829.crw066.com")
+
     def test_saved_storage_state_excludes_pinnacle(self):
         class FakePage:
             url = "https://hga038.com/login"
@@ -297,6 +319,152 @@ class CrownAccountTests(unittest.TestCase):
 
         self.assertEqual([cookie["name"] for cookie in state["cookies"]], ["crown"])
         self.assertEqual([origin["origin"] for origin in state["origins"]], ["https://hga038.com"])
+
+    def test_visible_member_page_saves_new_session_with_cas_baseline(self):
+        class FakeFrame:
+            url = "https://m829.crw066.com/"
+
+            def evaluate(self, _script):
+                return {
+                    "uid": "new-uid", "ver": "4.1.2", "langx": "zh-cn",
+                    "ltype": "1", "odd_f_type": "H",
+                }
+
+        class FakePage:
+            url = "https://m829.crw066.com/"
+            frames = [FakeFrame()]
+
+            def is_closed(self):
+                return False
+
+            def set_default_timeout(self, _timeout):
+                return None
+
+        stored = {
+            "uid": "old-uid",
+            "member_origin": "https://m829.crw066.com",
+            "member_authenticated": True,
+            "member_protocol": {
+                "origin": "https://m829.crw066.com", "ver": "4.1.2", "langx": "zh-cn",
+            },
+            "member_ui_verified": True,
+            "member_resume_query": {"ltype": "1", "odd_f_type": "H"},
+            "resume_url": "https://m829.crw066.com/",
+            "storage_state": {"cookies": [], "origins": []},
+            "saved_at": "old-saved-at",
+        }
+        account = {
+            "id": "account", "kind": "crown_odds", "base_url": "https://hga038.com",
+            "username": "member", "revision": 4,
+        }
+        saved = []
+        service = AuthService.__new__(AuthService)
+        service._visible_locator = lambda _frame, _selectors: None
+        service._manual_challenge = lambda _frame: False
+        service._member_signed_in = lambda _frame: True
+        service._save = lambda job: saved.append((job.uid, job.session_baseline))
+        service._set = lambda *_args, **_kwargs: None
+        service._log = lambda *_args, **_kwargs: None
+
+        outcome = service._sync_member_page(account, object(), FakePage(), stored)
+
+        self.assertEqual(outcome, "synced")
+        self.assertEqual(saved[0][0], "new-uid")
+        self.assertIs(saved[0][1], stored)
+
+    def test_visible_login_form_never_overwrites_saved_session(self):
+        class FakePage:
+            url = "https://m829.crw066.com/"
+            frames = [SimpleNamespace(url="https://m829.crw066.com/")]
+
+            def is_closed(self):
+                return False
+
+            def set_default_timeout(self, _timeout):
+                return None
+
+        stored = {
+            "uid": "old-uid", "member_origin": "https://m829.crw066.com",
+            "member_authenticated": True, "member_ui_verified": True,
+            "member_protocol": {
+                "origin": "https://m829.crw066.com", "ver": "4.1.2", "langx": "zh-cn",
+            },
+            "storage_state": {"cookies": [], "origins": []},
+        }
+        service = AuthService.__new__(AuthService)
+        service._visible_locator = lambda _frame, _selectors: object()
+        service._manual_challenge = lambda _frame: False
+        service._member_signed_in = lambda _frame: self.fail("login form must not be adopted")
+        service._save = lambda _job: self.fail("saved session must not be overwritten")
+
+        outcome = service._sync_member_page(
+            {"id": "account", "kind": "crown_odds", "base_url": "https://hga038.com"},
+            object(), FakePage(), stored,
+        )
+
+        self.assertEqual(outcome, "login_form")
+
+    def test_shared_tab_scan_reuses_crown_tab_without_touching_pinnacle(self):
+        crown_page = SimpleNamespace(
+            url="https://m829.crw066.com/", is_closed=lambda: False,
+        )
+        pinnacle_page = SimpleNamespace(
+            url="https://www.ps3838.com/zh-cn/sports/soccer", is_closed=lambda: False,
+        )
+        context = SimpleNamespace(pages=[pinnacle_page, crown_page])
+        service = AuthService.__new__(AuthService)
+        service._launch = lambda background=True: object()
+        service._acquire_context = lambda *_args: (context, False)
+        inspected = []
+        service._sync_member_page = lambda _account, _context, page, _stored: (
+            inspected.append(page) or "synced"
+        )
+        stored = {"member_origin": "https://m829.crw066.com"}
+        account = {"id": "account", "kind": "crown_odds", "base_url": "https://hga038.com"}
+
+        outcome = service._sync_shared_member_tabs(account, stored)
+
+        self.assertEqual(outcome, "synced")
+        self.assertEqual(inspected, [crown_page])
+
+    def test_visible_sync_conflict_does_not_replace_newer_session(self):
+        class FakeFrame:
+            url = "https://m829.crw066.com/"
+
+            def evaluate(self, _script):
+                return {"uid": "new-uid", "ver": "4.1.2", "langx": "zh-cn", "ltype": "1"}
+
+        class FakePage:
+            url = "https://m829.crw066.com/"
+            frames = [FakeFrame()]
+
+            def is_closed(self):
+                return False
+
+            def set_default_timeout(self, _timeout):
+                return None
+
+        stored = {
+            "uid": "old-uid", "member_origin": "https://m829.crw066.com",
+            "member_authenticated": True, "member_ui_verified": True,
+            "member_protocol": {
+                "origin": "https://m829.crw066.com", "ver": "4.1.2", "langx": "zh-cn",
+            },
+            "storage_state": {"cookies": [], "origins": []},
+        }
+        service = AuthService.__new__(AuthService)
+        service._visible_locator = lambda _frame, _selectors: None
+        service._manual_challenge = lambda _frame: False
+        service._member_signed_in = lambda _frame: True
+        service._save = lambda _job: (_ for _ in ()).throw(_SessionChanged("changed"))
+        service._log = lambda *_args, **_kwargs: None
+
+        outcome = service._sync_member_page(
+            {"id": "account", "kind": "crown_odds", "base_url": "https://hga038.com"},
+            object(), FakePage(), stored,
+        )
+
+        self.assertEqual(outcome, "conflict")
 
     def test_completed_login_keeps_visible_tab_until_disposed(self):
         class FakePage:
@@ -347,13 +515,28 @@ class CrownAccountTests(unittest.TestCase):
     def test_background_check_does_not_replace_visible_tab(self):
         class FakeStore:
             def get_account(self, account_id):
-                return {"id": account_id, "kind": "crown_odds", "enabled": True}
+                return {
+                    "id": account_id, "kind": "crown_odds", "enabled": True,
+                    "revision": 1, "base_url": "https://hga038.com",
+                    "login_path": "/", "username": "member",
+                }
 
-        retained = object()
+            def load_session(self, _account_id):
+                return None
+
+        retained = SimpleNamespace(
+            account_id="account",
+            account={
+                "kind": "crown_odds", "base_url": "https://hga038.com",
+                "login_path": "/", "username": "member",
+            },
+            context=object(), page=object(),
+        )
         service = AuthService.__new__(AuthService)
         service.store = FakeStore()
         service._jobs = {}
         service._visible_pages = {"account": retained}
+        service._sync_member_page = lambda *_args, **_kwargs: "not_signed_in"
 
         service._begin("account", background=True)
 

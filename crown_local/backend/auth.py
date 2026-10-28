@@ -176,6 +176,11 @@ class AuthService:
             raise ValueError("不支持的账号类型。")
         return account
 
+    @property
+    def shared_browser_configured(self):
+        """Whether Crown can inspect tabs in the shared Pingbo Chrome."""
+        return bool(os.environ.get("CROWN_CDP_URL", "").strip())
+
     def _enqueue(self, action, account_id, payload=None):
         with self._lock:
             account = self._account(account_id)
@@ -413,13 +418,8 @@ class AuthService:
         account = self._account(account_id)
         if not account.get("enabled", True):
             return
-        if background and account_id in self._visible_pages:
-            # A user-visible Crown tab is already open. Do not replace it with
-            # a scheduled check whose isolated context would immediately close.
-            return
         if len(self._jobs) >= 8 and account_id not in self._jobs:
             raise RuntimeError("同时打开的登录浏览器已达 8 个，请先停止其他任务。")
-        self._dispose(account_id)
         if not background:
             self._set(account_id, "checking" if restore else "logging_in", "正在检查会话。" if restore else "正在打开正常登录页面。")
         existing_session = self.store.load_session(account_id)
@@ -434,6 +434,25 @@ class AuthService:
         if stored and stored.get("auth_origin") != list(_origin(base_url)):
             self._set(account_id, "expired", "域名已变化，旧会话不能移交新来源，请重新登录。")
             return
+        if account["kind"] == "crown_odds":
+            retained = self._visible_pages.get(account_id)
+            if retained:
+                if self._is_current(retained):
+                    outcome = self._sync_member_page(
+                        account, retained.context, retained.page, existing_session,
+                        retained=retained,
+                    )
+                    if outcome in {"synced", "conflict", "save_error"} or background:
+                        return
+                elif background:
+                    return
+            if background and self.shared_browser_configured:
+                # The shared Chrome already contains the user's tabs. Inspect
+                # those tabs instead of creating another Crown tab or opening
+                # a separate isolated browser context.
+                self._sync_shared_member_tabs(account, existing_session)
+                return
+        self._dispose(account_id)
         check_account = {**account, "status": "checking"} if not background else account
         if stored and account["kind"] == "crown_odds" and self._check_saved_member(check_account, stored):
             return
@@ -685,6 +704,137 @@ class AuthService:
                     }
                 }
             })();""")
+
+    @staticmethod
+    def _page_matches_account(account, stored, url):
+        """Match only Crown origins already bound to this account."""
+        candidates = [account.get("base_url", "")]
+        if isinstance(stored, dict):
+            candidates.append(stored.get("member_origin", ""))
+            protocol = stored.get("member_protocol")
+            if isinstance(protocol, dict):
+                candidates.append(protocol.get("origin", ""))
+        try:
+            target = _origin(url)
+        except (TypeError, ValueError):
+            return False
+        for candidate in candidates:
+            try:
+                if candidate and _origin(candidate) == target:
+                    return True
+            except (TypeError, ValueError):
+                continue
+        return False
+
+    def _sync_shared_member_tabs(self, account, stored):
+        """Inspect existing tabs in the shared Chrome without opening another."""
+        try:
+            browser = self._launch(background=True)
+            context, _owns_context = self._acquire_context(browser, account, stored)
+        except Exception as exc:
+            self._diagnostic(account["id"], "check_page", exc)
+            return "unavailable"
+        for page in list(getattr(context, "pages", [])):
+            try:
+                if page.is_closed() or not self._page_matches_account(account, stored, page.url):
+                    continue
+            except Exception:
+                continue
+            outcome = self._sync_member_page(account, context, page, stored)
+            if outcome in {"synced", "conflict", "save_error"}:
+                return outcome
+        return "not_signed_in"
+
+    def _sync_member_page(self, account, context, page, stored, retained=None):
+        """Persist a manually completed login from a visible shared-Chrome tab.
+
+        The page must visibly expose the signed-in member UI. When its UID has
+        changed, the current Crown-scoped browser state replaces the old saved
+        snapshot with an optimistic-lock comparison. A login form or an
+        incomplete page never overwrites the existing session.
+        """
+        if account.get("kind") != "crown_odds":
+            return "not_signed_in"
+        try:
+            if page.is_closed():
+                return "absent"
+            page.set_default_timeout(2500)
+        except Exception:
+            return "unavailable"
+
+        if retained is not None:
+            job = retained
+            job.account = account
+            job.context = context
+            job.page = page
+            job.deadline = time.monotonic() + 35
+            job.status = "checking"
+            job.restore = True
+            job.background = True
+            job.session_saved = bool(stored)
+            job.session_baseline = stored
+            job.session_conflict = False
+            job.login_saved = False
+            job.login_recorded = bool(stored)
+        else:
+            job = _Job(
+                account["id"], account, context, page, time.monotonic() + 35,
+                status="checking", uid=(stored or {}).get("uid", ""), restore=True,
+                background=True, owns_context=False, session_saved=bool(stored),
+                session_baseline=stored,
+            )
+
+        if stored:
+            self._restore_member(job, stored)
+        else:
+            job.uid = ""
+            job.member_origin = ""
+            job.member_authenticated = False
+            job.member_protocol = {}
+            job.member_resume_query = {}
+            job.member_ui_verified = False
+            job.resume_url = ""
+
+        if not self._trusted_page(job, page.url):
+            return "absent"
+        try:
+            trusted_frames = [frame for frame in page.frames if self._trusted_page(job, frame.url)]
+        except Exception:
+            return "unavailable"
+
+        for frame in trusted_frames:
+            if self._visible_locator(frame, ['input[type="password"]']) is not None:
+                return "login_form"
+            if self._manual_challenge(frame):
+                return "login_form"
+        for frame in trusted_frames:
+            if not self._member_signed_in(frame):
+                continue
+            if not self._adopt_member_page_identity(job, frame, allow_uid_change=True):
+                continue
+            job.member_ui_verified = True
+            job.status = "authenticated"
+            job.ui_verified_at = time.monotonic()
+            try:
+                self._save(job)
+            except _SessionChanged:
+                self._log(account["id"], "login", "warning",
+                          "皇冠标签页会话同步遇到并发更新；已保留数据库中的较新会话。")
+                return "conflict"
+            except _SessionSaveError:
+                self._log(account["id"], "login", "warning",
+                          "皇冠标签页已登录，但会话保存失败；原会话未覆盖。")
+                return "save_error"
+            try:
+                self._set(account["id"], "authenticated",
+                          "已同步当前皇冠标签页的登录会话；正在恢复盘口读取。",
+                          last_checked=_now())
+                self._log(account["id"], "login", "authenticated",
+                          "已从当前皇冠标签页同步登录会话。")
+            except Exception:
+                pass
+            return "synced"
+        return "not_signed_in"
 
     def _guard_destination(self, route, job=None):
         """Do not let configured sites reach localhost/private network services."""
@@ -1099,7 +1249,7 @@ class AuthService:
             return {}
         return result
 
-    def _adopt_member_page_identity(self, job, frame):
+    def _adopt_member_page_identity(self, job, frame, *, allow_uid_change=False):
         """Recover a manually completed login when its response was not observable.
 
         The normal login response remains the preferred evidence. Some Crown
@@ -1110,7 +1260,7 @@ class AuthService:
         """
         values = self._member_page_identity_values(frame)
         uid = values.get("uid", "")
-        if not uid or (job.uid and job.uid != uid):
+        if not uid or (not allow_uid_change and job.uid and job.uid != uid):
             return False
         query = {
             key: value for key, value in values.items()
@@ -1137,7 +1287,7 @@ class AuthService:
             return False
         job.uid = uid
         job.member_authenticated = True
-        job.member_origin = job.member_origin or origin
+        job.member_origin = origin if allow_uid_change else job.member_origin or origin
         job.member_protocol = {"origin": origin, "ver": ver, "langx": langx}
         job.member_resume_query = query
         job.resume_url = parts._replace(query="", fragment="").geturl()
