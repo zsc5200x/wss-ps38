@@ -355,7 +355,7 @@ async function crownAccountAction(id,action){
   crownSetAccountsStatus("");
   try{
     const response=await fetch(`/api/crown/accounts/${encodeURIComponent(id)}/${action}`,{
-      method:action==="delete"?"DELETE":"POST",
+      method:"POST",
       headers:{"Content-Type":"application/json"},
     });
     const payload=await response.json().catch(()=>({}));
