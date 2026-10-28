@@ -60,9 +60,9 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   exit 1
 fi
 
-# Crown reuses the Chrome process that already owns the Pingbo tab. The
-# Playwright connection creates an isolated incognito context for Crown, so the
-# browser process is shared while cookies and saved sessions remain separated.
+# Crown reuses the Chrome process and default profile that already owns the
+# Pingbo tab. It opens a normal second tab; application-level filtering keeps
+# Pingbo cookies out of the encrypted Crown session snapshot.
 CDP_URL="${CROWN_CDP_URL:-}"
 if [[ -z "$CDP_URL" && -f "$PROJECT_DIR/config.json" ]]; then
   CDP_URL="$("$PYTHON_BIN" - "$PROJECT_DIR/config.json" <<'PY'
