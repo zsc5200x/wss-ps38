@@ -371,6 +371,7 @@ if(crownEmbedded){
     if(event.origin!==window.location.origin||event.source!==window.parent)return;
     const data=event.data||{};if(data.type!=="crown:command")return;
     if(data.command==="refresh")crownUpdate(true);
+    else if(data.command==="open-login")loginOpen();
     else if(data.command==="set-paused")crownSetPaused(Boolean(data.paused));
   });
   crownPostEmbeddedState();
