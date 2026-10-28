@@ -7,12 +7,10 @@ unknown switches and invalid prices are retained as unavailable diagnostics.
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation, ROUND_FLOOR
-import math
 import re
 import unicodedata
 import xml.etree.ElementTree as ET
 
-from .odds import to_hk_water
 
 
 _NUMBER = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)\Z")
@@ -27,7 +25,7 @@ _SAFE_GAME_FIELDS = frozenset({
     "HRECV", "RATIO", "HRATIO", "MODE", "MASTER", "GIDFL", "PTYPE_ID",
 })
 _SAFE_METADATA = frozenset({
-    "datacount", "totaldatacount", "pagecount", "pagedata", "status", "code",
+    "datacount", "totaldatacount", "pagecount", "pagedata", "status", "code", "msg",
     "gtype", "showtype", "rtype", "datetime", "systime", "timestamp", "isrb", "is_rb",
     "all_close", "nowmode",
     "ecid",
@@ -169,12 +167,6 @@ def normalize_line(value):
     return Decimal(0) if result == 0 else result
 
 
-def _decimal_text(value):
-    if value == 0:
-        return "0"
-    return format(value.normalize(), "f")
-
-
 def crown_hk_pair(home_raw, away_raw):
     """Return the source-verified Crown ``H`` display prices as Decimals.
 
@@ -222,119 +214,3 @@ def crown_hk_pair(home_raw, away_raw):
             high = Decimal(2000) - line - now
         result = (clip(high), clip(low)) if home > away else (clip(low), clip(high))
     return result if all(value > 0 for value in result) else None
-
-
-def _hk_odds(raw, odds_format):
-    if not isinstance(raw, str) or len(raw) > 40 or not _NUMBER.fullmatch(raw):
-        return None
-    return to_hk_water(raw, odds_format)
-
-
-def _score(game):
-    home, away = str(game.get("SCORE_H", "")), str(game.get("SCORE_C", ""))
-    if re.fullmatch(r"[0-9]{1,3}", home) and re.fullmatch(r"[0-9]{1,3}", away):
-        return [int(home), int(away)]
-    return None
-
-
-def extract_quotes(game, *, inplay: bool, odds_format: str):
-    """Extract ordinary football handicap/total quotes for full/first half.
-
-    The caller supplies the verified input odds format. HK/MY/EU/ID denote
-    already-formatted standard odds; CROWN_HK denotes raw Crown pairs displayed
-    by the site's verified H conversion. Unknown formats raise ``ValueError``.
-    Only verified Y/N market ``sw_*`` flags are used.
-    A missing line is omitted; a known line with blocked/invalid pricing remains
-    in the result with ``status='unavailable'`` and ``hk_odds=None``.
-    """
-    if not isinstance(inplay, bool):
-        raise ValueError("Crown quote inplay must be explicit")
-    if not isinstance(odds_format, str) or odds_format.upper() not in {"HK", "MY", "EU", "ID", "CROWN_HK"}:
-        raise ValueError("Crown quote odds format must be explicit and supported")
-    odds_format = odds_format.upper()
-    fields = {str(key).upper(): str(value).strip() if value is not None else ""
-              for key, value in game.items()}
-    # More rows include alternate goals/corners/cards under the same teams.
-    # Only the unqualified ordinary-football rows belong in this extractor.
-    if (fields.get("GTYPE", "FT").upper() != "FT" or fields.get("PTYPE", "")
-            or fields.get("MODE", "FT").upper() != "FT"):
-        return []
-    more = any(key in fields for key in ("MODE", "MASTER", "RATIO", "HRATIO", "RATIO_O", "RATIO_U", "RATIO_HO", "RATIO_HU"))
-    quotes = []
-    plans = (
-        ("full", "RE" if inplay else "R", "ROU" if inplay else "OU", "STRONG"),
-        ("first_half", "HRE" if inplay else "HR", "HROU" if inplay else "HOU", "HSTRONG"),
-    )
-    score = _score(fields)
-
-    def append(period, market_type, market, selection, line, ratio_key, odds_key, direction_known=True):
-        raw_odds = fields.get(odds_key, "")
-        if odds_format == "CROWN_HK":
-            prefix = odds_key[:-1]
-            pair = crown_hk_pair(fields.get(prefix + "H", ""), fields.get(prefix + "C", ""))
-            converted = float(pair[0 if odds_key.endswith("H") else 1]) if pair else None
-        else:
-            converted = _hk_odds(raw_odds, odds_format)
-        reasons = []
-        if fields.get("GOPEN") != "Y":
-            reasons.append("game_not_open")
-        if not more and period == "first_half" and "HGOPEN" in fields and fields["HGOPEN"] != "Y":
-            reasons.append("period_not_open")
-        if "IS_RB" in fields and fields["IS_RB"] not in ({"Y"} if inplay else {"N"}):
-            reasons.append("inplay_unconfirmed")
-        # Verified game_more FT parseData checks gopen and sw_<market>.
-        # SW_OUH/SW_OUC belong to team totals, not the sides of ordinary OU.
-        switch_key = "SW_" + market
-        if more or switch_key in fields:
-            switch = fields.get(switch_key)
-            if switch in (None, "N"):
-                reasons.append("market_not_open")
-            elif switch != "Y":
-                reasons.append("unknown_switch")
-        if not direction_known:
-            reasons.append("unknown_handicap_direction")
-        if converted is None:
-            reasons.append("invalid_odds")
-        quotes.append({
-            "type": market_type, "market_type": market_type, "period": period,
-            "selection": selection, "line": _decimal_text(line) if line is not None else None,
-            "inplay": inplay, "score": score, "hk_odds": converted if not reasons else None,
-            "raw_odds": raw_odds, "odds_format": odds_format,
-            "status": "unavailable" if reasons else "open", "unavailable_reasons": reasons,
-            "gid": fields.get("GID", fields.get("ID", "")),
-            "gidm": fields.get("GIDM", ""), "hgid": fields.get("HGID", ""),
-            "market_id": fields.get("GIDM") or fields.get("GID", fields.get("ID", "")),
-            "ecid": fields.get("ECID", ""),
-            "source": {"market": market, "ratio_field": ratio_key, "odds_field": odds_key,
-                       "raw_line": fields.get(ratio_key, ""),
-                       "schema": "more" if more else "list",
-                       "output_odds_format": "HK",
-                       "switches": {switch_key: fields[switch_key]} if switch_key in fields else {},
-                       "flags": {key: fields[key] for key in ("GOPEN", "HGOPEN", "RECV", "HRECV") if key in fields}},
-        })
-
-    for period, handicap, total, strong_key in plans:
-        ratio_key = "RATIO_" + handicap
-        if ratio_key not in fields and more and not inplay:
-            ratio_key = "RATIO" if period == "full" else "HRATIO"
-        line = normalize_line(fields.get(ratio_key))
-        if line is not None:
-            # RATIO_R/RE are magnitudes. Only STRONG identifies which side gives.
-            # A negative ratio would conflict with this wire representation.
-            strong = fields.get(strong_key, "")
-            known = line == 0 or (line > 0 and strong in {"H", "C"})
-            home_line = (-line if strong == "H" else line) if known else None
-            append(period, "handicap", handicap, "home", home_line, ratio_key,
-                   "IOR_" + handicap + "H", known)
-            append(period, "handicap", handicap, "away", -home_line if home_line is not None else None,
-                   ratio_key, "IOR_" + handicap + "C", known)
-        # Verified member page switchConRtype: OUC/ROUC -> ratio_o/ratio_rouo
-        # (ART_game_over); OUH/ROUH -> ratio_u/ratio_rouu (ART_game_under).
-        for selection, suffix, price_suffix in (("over", "O", "C"), ("under", "U", "H")):
-            ratio_key = "RATIO_" + total + suffix
-            if ratio_key not in fields and more and not inplay:
-                ratio_key = "RATIO_" + ("H" if period == "first_half" else "") + suffix
-            line = normalize_line(fields.get(ratio_key))
-            if line is not None and line >= 0:
-                append(period, "total", total, selection, line, ratio_key, "IOR_" + total + price_suffix)
-    return quotes

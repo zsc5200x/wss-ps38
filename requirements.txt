@@ -2,5 +2,3 @@ cryptography
 keyring
 playwright
 pyotp
-rapidfuzz>=3,<4
-websocket-client>=1.9,<2

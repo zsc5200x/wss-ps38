@@ -40,6 +40,10 @@ class MemberExpired(MemberError):
     pass
 
 
+class MemberSessionConflict(MemberError):
+    """The provider rejected a valid-looking session because another login won."""
+
+
 class _SameOriginCookies(DefaultCookiePolicy):
     def __init__(self, host):
         super().__init__()
@@ -252,7 +256,10 @@ class CrownMemberClient:
             if child.tag not in ("msg", "systemtime", "systimestamp") or child.tag in values or list(child):
                 raise MemberUnavailable("会员在线检查返回格式异常，稍后自动重试")
             values[child.tag] = child.text or ""
-        if (values.get("msg", "") != "" or
+        message = values.get("msg", "").strip()
+        if message.casefold() == "doublelogin":
+            raise MemberSessionConflict("皇冠提示重复登录")
+        if (message != "" or
                 not re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", values.get("systemtime", "")) or
                 not _TIMESTAMP.fullmatch(values.get("systimestamp", ""))):
             raise MemberUnavailable("会员在线检查未确认会话，稍后由登录页面复核")
@@ -428,6 +435,11 @@ class CrownMemberMonitor:
                     if self._update_state(account, session, "expired", "会员站点确认会话失效，正在尝试重新登录"):
                         self._next_due[identity] = now
                         self._start_relogin(account, session)
+                except MemberSessionConflict:
+                    self._clients.pop(identity, None)
+                    if self._update_state(account, session, "session_received",
+                                          "皇冠提示重复登录，请退出其他设备会话后重新登录"):
+                        self._next_due[identity] = now + 300
                 except MemberUnavailable:
                     self._clients.pop(identity, None)
                     count = self._failures.get(identity, 0) + 1

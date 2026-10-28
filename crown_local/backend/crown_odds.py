@@ -7,7 +7,10 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request
 
-from .crown_member import CrownMemberClient, MemberExpired, MemberNeedsBrowser, MemberUnavailable
+from .crown_member import (
+    CrownMemberClient, MemberExpired, MemberNeedsBrowser, MemberSessionConflict,
+    MemberUnavailable,
+)
 from .crown_markets import parse_games_xml
 
 MAX_ODDS_BYTES = 8 * 1024 * 1024
@@ -32,6 +35,8 @@ def safe_failure(error):
         if error.request_attempts > 1:
             result['request_attempts'] = error.request_attempts
         return result
+    if isinstance(error, MemberSessionConflict):
+        return {'reason': 'session_conflict', 'error_type': 'MemberSessionConflict'}
     if isinstance(error, MemberExpired):
         return {'reason': 'session_expired', 'error_type': 'MemberExpired'}
     if isinstance(error, MemberNeedsBrowser):
@@ -132,6 +137,12 @@ class CrownOddsClient(CrownMemberClient):
                         codes = {key.lower(): value for key, value in parsed['metadata'].items()}
                         if codes.get('status') in {'401', '403', '440'}:
                             raise MemberExpired('皇冠盘口会话已失效')
+                        if str(codes.get('code') or '').strip().casefold() == 'error':
+                            message = str(codes.get('msg') or '').strip().casefold()
+                            if message == 'doublelogin':
+                                raise MemberSessionConflict('皇冠提示重复登录')
+                            raise OddsUnavailable('upstream_response_invalid',
+                                                  request_attempts=attempt + 1)
                         parsed['_request_attempts'] = attempt + 1
                         return parsed
             if not retryable or attempt >= self.max_retries:

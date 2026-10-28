@@ -2,19 +2,25 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 import os
 from pathlib import Path
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from crown_local.backend.crown_markets import crown_hk_pair, extract_quotes, normalize_line
+from crown_local.backend.crown_markets import crown_hk_pair, normalize_line
 from crown_local.backend.odds import to_hk_water
 from event_filters import is_excluded_league
 
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
+EVENTS_CACHE_PATH = DATA_DIR / "events-cache.json"
+EVENTS_CACHE_VERSION = 1
+EVENTS_CACHE_MAX_BYTES = 16 * 1024 * 1024
+EVENTS_CACHE_MAX_EVENTS = 20000
 
 try:
     from crown_local.backend.auth import AuthService
@@ -38,6 +44,7 @@ state = {
     "updated_at": None,
     "status": "未添加账号",
     "error": None,
+    "cached": False,
     "source": "当前项目本地皇冠账号",
     "diagnostics": {
         "refresh_count": 0,
@@ -46,6 +53,11 @@ state = {
         "last_snapshot_interval_ms": None,
         "details_refreshing": False,
         "last_details_duration_ms": None,
+        "consecutive_failures": 0,
+        "last_success_at": None,
+        "last_failure_at": None,
+        "last_failure_reason": None,
+        "refresh_in_progress": False,
     },
 }
 store = None
@@ -53,13 +65,20 @@ auth = None
 monitor = None
 
 # ``get_game_more`` is a second read-only request per fixture. Keep bounded
-# per-fixture caches while the base today/live feed refreshes every five seconds.
+# per-fixture caches while the base today/live feed refreshes every six seconds.
 _MORE_CACHE_TTL = 30.0
 _MORE_LIVE_CACHE_TTL = 10.0
-_MORE_MAX_WORKERS = 6
+_MORE_MAX_WORKERS = 2
+_MORE_BATCH_SIZE = 12
+_MORE_LIVE_REFRESH_LIMIT = 4
 _more_cache_lock = threading.RLock()
 _more_cache = {}
+_more_detail_locks_lock = threading.Lock()
+_more_detail_locks = {}
+_more_sources_lock = threading.RLock()
+_more_sources = {"client": None, "raw_format": None, "games": {}}
 _more_refresh_lock = threading.Lock()
+_refresh_lock = threading.Lock()
 _last_snapshot_monotonic = None
 
 
@@ -69,6 +88,113 @@ def _configure_browser():
     chrome = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
     if chrome.exists():
         os.environ.setdefault("HD_REPORT_BROWSER_EXECUTABLE", str(chrome))
+
+
+def _cache_load_failed():
+    with lock:
+        diagnostics = dict(state.get("diagnostics") or {})
+        diagnostics["cache_load_failed"] = True
+        state["diagnostics"] = diagnostics
+
+
+def _load_event_cache():
+    """Load only normalized, credential-free events from the last snapshot."""
+    if not EVENTS_CACHE_PATH.is_file() or EVENTS_CACHE_PATH.is_symlink():
+        return False
+    try:
+        if EVENTS_CACHE_PATH.stat().st_size > EVENTS_CACHE_MAX_BYTES:
+            raise ValueError("cache too large")
+        document = json.loads(EVENTS_CACHE_PATH.read_text(encoding="utf-8"))
+        if not isinstance(document, dict) or document.get("version") != EVENTS_CACHE_VERSION:
+            raise ValueError("unsupported cache version")
+        updated_at = document.get("updated_at")
+        events = document.get("events")
+        if not isinstance(updated_at, str) or not updated_at or len(updated_at) > 64:
+            raise ValueError("invalid cache timestamp")
+        datetime.fromisoformat(updated_at)
+        if not isinstance(events, list) or len(events) > EVENTS_CACHE_MAX_EVENTS:
+            raise ValueError("invalid cache events")
+        normalized = []
+        for event in events:
+            if (not isinstance(event, dict)
+                    or not isinstance(event.get("id"), str) or not event["id"]
+                    or not isinstance(event.get("league"), str)
+                    or not isinstance(event.get("home"), str)
+                    or not isinstance(event.get("away"), str)
+                    or not isinstance(event.get("markets"), dict)):
+                raise ValueError("invalid cached event")
+            normalized.append(event)
+    except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+        _cache_load_failed()
+        return False
+
+    leagues = sorted({event["league"] for event in normalized if event["league"]})
+    with lock:
+        diagnostics = dict(state.get("diagnostics") or {})
+        diagnostics.update({
+            "cache_loaded": True,
+            "cache_updated_at": updated_at,
+            "last_success_at": updated_at,
+        })
+        state.update({
+            "events": normalized,
+            "leagues": leagues,
+            "updated_at": updated_at,
+            "status": "缓存数据",
+            "error": None,
+            "cached": True,
+            "diagnostics": diagnostics,
+        })
+    return True
+
+
+def _write_event_cache(events, updated_at):
+    """Atomically persist a bounded normalized snapshot with owner-only access."""
+    document = {
+        "version": EVENTS_CACHE_VERSION,
+        "saved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "updated_at": updated_at,
+        "events": events,
+    }
+    encoded = json.dumps(
+        document, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    if len(encoded) > EVENTS_CACHE_MAX_BYTES or len(events) > EVENTS_CACHE_MAX_EVENTS:
+        raise ValueError("snapshot exceeds cache limit")
+    DATA_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=".events-cache-", suffix=".tmp", dir=str(DATA_DIR)
+    )
+    try:
+        os.chmod(temporary, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, EVENTS_CACHE_PATH)
+        os.chmod(EVENTS_CACHE_PATH, 0o600)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def _persist_event_cache(events, updated_at):
+    # Unit tests inject a fake store. Restrict writes to the initialized local
+    # runtime so tests can never overwrite the operator's real snapshot.
+    if Store is None or store is None or auth is None or not isinstance(store, Store):
+        return
+    try:
+        _write_event_cache(events, updated_at)
+    except (OSError, ValueError, TypeError):
+        with lock:
+            diagnostics = dict(state.get("diagnostics") or {})
+            diagnostics["cache_write_failed"] = True
+            state["diagnostics"] = diagnostics
 
 
 def initialize():
@@ -82,6 +208,7 @@ def initialize():
         return
     _configure_browser()
     store = Store(DATA_DIR, initialize=True)
+    _load_event_cache()
     auth = AuthService(store)
     monitor = CrownMemberMonitor(store, auth)
     monitor.start()
@@ -161,11 +288,15 @@ def submit_otp(account_id, code):
 
 def _safe_reason(error):
     name = error.__class__.__name__
+    if name == "MemberSessionConflict":
+        return "session_conflict"
     if name == "MemberExpired":
         return "session_expired"
     if name == "MemberNeedsBrowser":
         return "session_unverified"
-    if name in {"MemberUnavailable", "OddsUnavailable"}:
+    if name == "OddsUnavailable":
+        return getattr(error, "reason", "upstream_unavailable")
+    if name == "MemberUnavailable":
         return "upstream_unavailable"
     return "crown_unavailable"
 
@@ -211,9 +342,9 @@ def _normalize_more_markets(rows, raw_format):
 
     Crown uses a compact field catalogue rather than one XML node per market.
     The ``RATIO`` fields identify lines and the matching ``IOR`` fields carry
-    the two water values. We preserve the provider keys and row IDs so the UI
-    can show all available alternate lines without pretending that a shared
-    ``GIDM`` is unique to one selection.
+    the two water values. We preserve the row IDs so the UI can show all
+    available alternate lines without pretending that a shared ``GIDM`` is
+    unique to one selection.
     """
     result = {"handicap": [], "total": [], "moneyline": [], "rows": []}
     seen = set()
@@ -283,26 +414,113 @@ def _normalize_more_markets(rows, raw_format):
     return result
 
 
+def _more_detail_lock(gid):
+    with _more_detail_locks_lock:
+        return _more_detail_locks.setdefault(gid, threading.Lock())
+
+
 def _cached_more_markets(client, game, mode, raw_format):
     gid = str(game.get("GID") or game.get("ID") or "")
     if not gid or not callable(getattr(client, "game_more", None)):
         return {"status": "not_requested", "handicap": [], "total": [], "moneyline": [], "rows": []}
-    now = time.monotonic()
-    ttl = _MORE_LIVE_CACHE_TTL if mode == "live" else _MORE_CACHE_TTL
-    cache_key = (gid, mode, raw_format)
-    with _more_cache_lock:
-        cached = _more_cache.get(cache_key)
-        if cached and now - cached["created_at"] < ttl:
-            return cached["value"]
+    with _more_detail_lock(gid):
+        now = time.monotonic()
+        ttl = _MORE_LIVE_CACHE_TTL if mode == "live" else _MORE_CACHE_TTL
+        cache_key = (gid, mode, raw_format)
+        with _more_cache_lock:
+            cached = _more_cache.get(cache_key)
+            if cached and now - cached["created_at"] < ttl:
+                return cached["value"]
+        try:
+            payload = client.game_more(game, mode)
+            value = _normalize_more_markets(payload.get("games", []), raw_format)
+            value["status"] = "loaded"
+        except Exception:
+            # A transient game_more failure must not erase alternate lines that
+            # were already shown. Keep the last good value until a retry succeeds.
+            if cached and isinstance(cached.get("value"), dict) and cached["value"].get("status") == "loaded":
+                return cached["value"]
+            value = {"status": "unavailable", "handicap": [], "total": [], "moneyline": [], "rows": []}
+        with _more_cache_lock:
+            _more_cache[cache_key] = {"created_at": time.monotonic(), "value": value}
+        return value
+
+
+def _register_more_sources(client, games, raw_format):
+    sources = {}
+    for game, mode in games:
+        gid = str(game.get("GID") or game.get("ID") or "")
+        if gid:
+            sources[gid] = (game, mode)
+    with _more_sources_lock:
+        _more_sources.update({
+            "client": client,
+            "raw_format": raw_format,
+            "games": sources,
+        })
+
+
+def _public_more_markets(more_markets):
+    more_markets = more_markets if isinstance(more_markets, dict) else {}
+    return {
+        "status": more_markets.get("status", "not_requested"),
+        "handicap": list(more_markets.get("handicap") or []),
+        "total": list(more_markets.get("total") or []),
+        "moneyline": list(more_markets.get("moneyline") or []),
+        "rows": list(more_markets.get("rows") or []),
+    }
+
+
+def _publish_event_more_markets(gid, more_markets):
+    published = _public_more_markets(more_markets)
+    with lock:
+        events = list(state.get("events") or [])
+        for index, event in enumerate(events):
+            if str(event.get("id") or "") != gid:
+                continue
+            updated = dict(event)
+            updated["extra_markets"] = published
+            events[index] = updated
+            state["events"] = events
+            diagnostics = dict(state.get("diagnostics") or {})
+            diagnostics["last_event_details_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+            diagnostics["last_event_details_gid"] = gid
+            state["diagnostics"] = diagnostics
+            break
+    return published
+
+
+def refresh_event_more(gid):
+    """Load alternate lines for one selected fixture without overloading Crown."""
+    gid = str(gid or "").strip()
+    with _more_sources_lock:
+        source = (_more_sources.get("games") or {}).get(gid)
+        client = _more_sources.get("client")
+        raw_format = _more_sources.get("raw_format")
+    if not gid or source is None or client is None:
+        raise KeyError("赛事已更新，请稍后重试")
+
+    # Share the background detail lock so an on-demand request never adds a
+    # third concurrent Crown request while a scheduled batch is still running.
+    if not _more_refresh_lock.acquire(timeout=8):
+        return {"status": "loading", "gid": gid}
     try:
-        payload = client.game_more(game, mode)
-        value = _normalize_more_markets(payload.get("games", []), raw_format)
-        value["status"] = "loaded"
-    except Exception:
-        value = {"status": "unavailable", "handicap": [], "total": [], "moneyline": [], "rows": []}
-    with _more_cache_lock:
-        _more_cache[cache_key] = {"created_at": time.monotonic(), "value": value}
-    return value
+        loaded = _load_more_markets(client, [source], raw_format)
+        value = loaded.get(gid) or {
+            "status": "unavailable", "handicap": [], "total": [], "moneyline": [], "rows": [],
+        }
+        if value.get("status") == "loaded":
+            value = _publish_event_more_markets(gid, value)
+    finally:
+        _more_refresh_lock.release()
+    return {
+        "status": value.get("status"),
+        "gid": gid,
+        "counts": {
+            market_type: len(value.get(market_type) or [])
+            for market_type in ("handicap", "total", "moneyline")
+        },
+    }
 
 
 def _cached_more_snapshot(game, mode, raw_format):
@@ -366,6 +584,62 @@ def _load_more_markets(client, games, raw_format):
     return result
 
 
+def _more_cache_entry(game, mode, raw_format=None):
+    gid = str(game.get("GID") or game.get("ID") or "")
+    if not gid:
+        return None
+    with _more_cache_lock:
+        if raw_format:
+            return _more_cache.get((gid, mode, raw_format))
+        return next(
+            (
+                cached for key, cached in _more_cache.items()
+                if key[0] == gid and key[1] == mode
+            ),
+            None,
+        )
+
+
+def _select_more_refresh_batch(expired, raw_format=None):
+    # Crown rate-limits game_more aggressively.  Keep the fixed-size batch,
+    # but reserve most slots for fixtures that have never been loaded.  The
+    # previous "all live first" policy could consume every batch forever and
+    # leave ordinary matches permanently without alternate lines.
+    def unique(items):
+        result = []
+        seen = set()
+        for game, mode in items:
+            gid = str(game.get("GID") or game.get("ID") or "")
+            key = (gid, mode)
+            if not gid or key in seen:
+                continue
+            seen.add(key)
+            result.append((game, mode))
+        return result
+
+    def sort_key(item):
+        cached = _more_cache_entry(item[0], item[1], raw_format)
+        loaded = bool(
+            cached
+            and isinstance(cached.get("value"), dict)
+            and cached["value"].get("status") == "loaded"
+        )
+        return (loaded, cached.get("created_at", float("-inf")) if cached else float("-inf"))
+
+    games = unique(expired)
+    live = sorted((item for item in games if item[1] == "live"), key=sort_key)
+    other = sorted((item for item in games if item[1] != "live"), key=sort_key)
+
+    selected = live[:_MORE_LIVE_REFRESH_LIMIT]
+    slots = _MORE_BATCH_SIZE - len(selected)
+    selected.extend(other[:slots])
+
+    if len(selected) < _MORE_BATCH_SIZE:
+        remaining = live[_MORE_LIVE_REFRESH_LIMIT:] + other[slots:]
+        selected.extend(sorted(remaining, key=sort_key)[:_MORE_BATCH_SIZE - len(selected)])
+    return selected[:_MORE_BATCH_SIZE]
+
+
 def _start_more_markets_refresh(client, games, raw_format):
     if not games or not callable(getattr(client, "game_more", None)):
         return False
@@ -376,16 +650,21 @@ def _start_more_markets_refresh(client, games, raw_format):
     ]
     if not expired or not _more_refresh_lock.acquire(blocking=False):
         return False
+    batch = _select_more_refresh_batch(expired, raw_format)
 
     with lock:
         diagnostics = dict(state.get("diagnostics") or {})
-        diagnostics["details_refreshing"] = True
+        diagnostics.update({
+            "details_refreshing": True,
+            "details_batch_size": len(batch),
+            "details_pending": max(0, len(expired) - len(batch)),
+        })
         state["diagnostics"] = diagnostics
 
     def refresh_details():
         started = time.monotonic()
         try:
-            _load_more_markets(client, expired, raw_format)
+            _load_more_markets(client, batch, raw_format)
         finally:
             completed = datetime.now().astimezone().isoformat(timespec="seconds")
             duration_ms = round((time.monotonic() - started) * 1000, 1)
@@ -416,6 +695,27 @@ def _start_more_markets_refresh(client, games, raw_format):
 
 
 def refresh_once():
+    if not _refresh_lock.acquire(blocking=False):
+        with lock:
+            diagnostics = dict(state.get("diagnostics") or {})
+            diagnostics["refresh_in_progress"] = True
+            state["diagnostics"] = diagnostics
+        return {"ok": False, "reason": "refresh_in_progress", "in_progress": True}
+    with lock:
+        diagnostics = dict(state.get("diagnostics") or {})
+        diagnostics["refresh_in_progress"] = True
+        state["diagnostics"] = diagnostics
+    try:
+        return _refresh_once_locked()
+    finally:
+        with lock:
+            diagnostics = dict(state.get("diagnostics") or {})
+            diagnostics["refresh_in_progress"] = False
+            state["diagnostics"] = diagnostics
+        _refresh_lock.release()
+
+
+def _refresh_once_locked():
     global _last_snapshot_monotonic
     refresh_started = time.monotonic()
     initialize()
@@ -425,6 +725,7 @@ def refresh_once():
             state["leagues"] = []
             state["status"] = "运行环境未安装依赖"
             state["error"] = "请使用当前项目 .venv 启动"
+            state["cached"] = False
         return {"ok": False, "reason": "runtime_unavailable"}
     accounts = [
         account for account in store.accounts()
@@ -437,6 +738,7 @@ def refresh_once():
             state["leagues"] = []
             state["status"] = "未登录" if accounts else "未添加账号"
             state["error"] = None
+            state["cached"] = False
         return {"ok": False, "reason": "no_session"}
     try:
         session = store.load_session(account["id"])
@@ -452,6 +754,7 @@ def refresh_once():
             (item, mode) for item, mode in source_games
             if not is_excluded_league(item.get("LEAGUE"))
         ]
+        _register_more_sources(client, source_games, raw_format)
         more_by_gid = {
             str(item.get("GID") or item.get("ID") or ""): cached
             for item, mode in source_games
@@ -481,6 +784,9 @@ def refresh_once():
                     round((committed - previous_snapshot) * 1000, 1)
                     if previous_snapshot is not None else None
                 ),
+                "consecutive_failures": 0,
+                "last_success_at": timestamp,
+                "last_failure_reason": None,
             })
             state.update({
                 "events": events,
@@ -488,15 +794,36 @@ def refresh_once():
                 "updated_at": timestamp,
                 "status": "已连接",
                 "error": None,
+                "cached": False,
                 "diagnostics": diagnostics,
             })
+        _persist_event_cache(events, timestamp)
         _start_more_markets_refresh(client, source_games, raw_format)
         return {"ok": True, "events": events, "leagues": leagues}
     except Exception as exc:
         reason = _safe_reason(exc)
+        failed_at = datetime.now().astimezone().isoformat(timespec="seconds")
         with lock:
-            state["status"] = "需要重新登录" if reason == "session_expired" else "暂不可用"
-            state["error"] = reason
+            diagnostics = dict(state.get("diagnostics") or {})
+            diagnostics.update({
+                "consecutive_failures": int(diagnostics.get("consecutive_failures") or 0) + 1,
+                "last_failure_at": failed_at,
+                "last_failure_reason": reason,
+                "last_refresh_duration_ms": round((time.monotonic() - refresh_started) * 1000, 1),
+            })
+            has_previous_events = bool(state.get("events"))
+            if reason in {"session_expired", "session_unverified", "session_conflict"}:
+                status = "需要重新登录"
+            elif has_previous_events:
+                status = "数据延迟"
+            else:
+                status = "暂不可用"
+            state.update({
+                "status": status,
+                "error": reason,
+                "cached": has_previous_events,
+                "diagnostics": diagnostics,
+            })
         return {"ok": False, "reason": reason}
 
 
@@ -525,46 +852,12 @@ def _format_hk(value):
     return "" if value is None else f"{value:.2f}"
 
 
-def _match_quotes(game, *, inplay, odds_format):
-    """Return direction-aware Crown quotes for cross-provider matching.
-
-    The legacy ``markets`` payload is kept for the existing display.  Matching
-    uses the parser's explicit selection and normalized line instead, so an
-    unknown handicap direction or a blocked market cannot be compared by
-    accident.
-    """
-    try:
-        quotes = extract_quotes(game, inplay=inplay, odds_format=odds_format)
-    except (TypeError, ValueError):
-        return []
-    result = []
-    for quote in quotes:
-        if quote.get("status") != "open" or quote.get("hk_odds") is None:
-            continue
-        if quote.get("market_type") not in {"handicap", "total"}:
-            # The match engine can compare 1X2 quotes too, but keep the
-            # selection names explicit when they are present.
-            if quote.get("market_type") != "moneyline":
-                continue
-        result.append({
-            "market_type": str(quote.get("market_type") or quote.get("type") or ""),
-            "period": str(quote.get("period") or "full"),
-            "selection": str(quote.get("selection") or ""),
-            "line": quote.get("line"),
-            "hk_odds": float(quote["hk_odds"]),
-            "raw_odds": quote.get("raw_odds"),
-            "source": quote.get("source") or {},
-        })
-    return result
-
-
 def _normalize_event(game, mode, display_format="HK", raw_format="CROWN_HK", more_markets=None):
     live = mode == "live"
     if live:
         handicap = _market(game.get("RATIO_RE"), game.get("IOR_REH"), game.get("IOR_REC"), raw_format)
         # Crown's ordinary total market exposes under on IOR_*H and over on
-        # IOR_*C. Keep the public pair in the same over/under order as
-        # Pinnacle so cross-provider matching compares the same selections.
+        # IOR_*C. Keep the public pair in over/under order for display.
         total = _market(game.get("RATIO_ROUO"), game.get("IOR_ROUC"), game.get("IOR_ROUH"), raw_format)
     else:
         handicap = _market(game.get("RATIO_R"), game.get("IOR_RH"), game.get("IOR_RC"), raw_format)
@@ -579,11 +872,10 @@ def _normalize_event(game, mode, display_format="HK", raw_format="CROWN_HK", mor
         "status": "not_requested", "handicap": [], "total": [], "moneyline": [], "rows": [],
     }
 
-    # Attach the provider row identifiers to the ordinary list markets.  The
-    # list endpoint has the cleanest display values, while ``game_more`` is
-    # where Crown exposes the row/group IDs for the master line.  Matching by
-    # normalized line keeps quarter-goal strings such as ``1 / 1.5`` aligned
-    # with the more response's decimal ``1.25`` representation.
+    # Attach Crown row identifiers to the ordinary list markets. The list
+    # endpoint has the cleanest display values, while ``game_more`` exposes
+    # the row/group IDs for the master line. Normalize lines so quarter-goal
+    # strings such as ``1 / 1.5`` align with the more response's ``1.25``.
     def attach_ids(items, extras):
         masters = [item for item in extras if isinstance(item, dict) and item.get("master") == "Y"]
         for item in items:
@@ -620,14 +912,7 @@ def _normalize_event(game, mode, display_format="HK", raw_format="CROWN_HK", mor
         "minute": str(game.get("RETIMESET") or ""),
         "period": str(game.get("NOW_MODEL") or "") if live else "",
         "markets": {"handicap": handicap, "total": total, "moneyline": moneyline},
-        "extra_markets": {
-            "status": more_markets.get("status", "not_requested"),
-            "handicap": list(more_markets.get("handicap") or []),
-            "total": list(more_markets.get("total") or []),
-            "moneyline": list(more_markets.get("moneyline") or []),
-            "rows": list(more_markets.get("rows") or []),
-        },
-        "match_quotes": _match_quotes(game, inplay=live, odds_format=raw_format),
+        "extra_markets": _public_more_markets(more_markets),
         "odds_format": display_format,
         "odds_format_label": "皇冠港赔（HK）" if display_format == "HK" else f"皇冠赔率（{display_format}）",
     }

@@ -18,7 +18,6 @@ import time
 from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlsplit
 
 from .providers import KINDS, MAX_RESPONSE_BYTES, parse_login_response, parse_member_login_domain
-from .crown_live import MAX_RESPONSE_BYTES as CROWN_ADMIN_RESPONSE_BYTES
 from .storage import SessionChangedError
 from .totp import TOTP_INTERVAL, generate_code
 
@@ -41,7 +40,6 @@ _MEMBER_RESUME_KEYS = frozenset({
 })
 _MEMBER_QUERY_MAX_LENGTH = 16384
 _SESSION_BASELINE_UNSET = object()
-_CROWN_ADMIN_PROBE_ATTEMPTS = 4
 
 
 class _SessionSaveError(RuntimeError):
@@ -80,25 +78,12 @@ class _Job:
     member_resume_query: dict = field(default_factory=dict, repr=False)
     member_ui_verified: bool = False
     ui_verified_at: float = 0
-    admin_completion_pending: bool = False
-    admin_ui_verified_at: float = 0
-    admin_ui_url: str = ""
-    admin_ui_storage_state: dict = field(default_factory=dict, repr=False)
     totp_submitted_counter: int = -1
     totp_attempts: int = 0
-    admin_protocol: dict = field(default_factory=dict, repr=False)
-    admin_protocol_headers: dict = field(default_factory=dict, repr=False)
-    admin_login_layer: str = ""
-    admin_report_attempts: int = 0
-    admin_report_retry_at: float = 0
     transient_failures: int = 0
     retry_at: float = 0
     stage: str = "open_page"
     navigation_url: str = field(default="", repr=False)
-    keep_open: bool = False
-    pinnacle_verified: bool = False
-    pinnacle_scope: dict = field(default_factory=dict, repr=False)
-    next_session_sync: float = 0
 
 
 class AuthService:
@@ -111,7 +96,6 @@ class AuthService:
         self._stop = threading.Event()
         self._browser = None
         self._background_browser = None
-        self._pinnacle_browser = None
         self._playwright = None
         self._destinations = {}
         self._thread = threading.Thread(target=self._run, name="account-login", daemon=True)
@@ -133,14 +117,6 @@ class AuthService:
             if self._stop.is_set():
                 raise ValueError("登录服务已关闭。")
             if action in {"start", "test"}:
-                live = self._jobs.get(account_id)
-                if live and live.keep_open and self._is_current(live):
-                    # All page operations still run on the login worker.
-                    try:
-                        self._commands.put_nowait(("reuse", account_id, {"check": action == "test"}))
-                    except queue.Full:
-                        raise ValueError("登录任务繁忙，请稍后重试。") from None
-                    return account
                 background = action == "test" and bool((payload or {}).get("background"))
                 if (account_id in self._jobs or account.get("status") in {"logging_in", "checking", "awaiting_otp", "awaiting_manual"}
                         or account_id in getattr(self, "_pending_checks", set())):
@@ -193,7 +169,7 @@ class AuthService:
     def browser_open(self, account_id):
         # HTTP handlers only read worker metadata, never Playwright objects.
         job = self._jobs.get(account_id)
-        return bool(job and job.keep_open and self._is_current(job))
+        return bool(job and self._is_current(job))
 
     def close(self):
         self._stop.set()
@@ -239,22 +215,7 @@ class AuthService:
         return current == expected
 
     def _end_stale_session_job(self, job):
-        """Stop stale checks while preserving persistent Pinnacle windows."""
-        if job.keep_open and job.account.get("kind") == "pinnacle" and self._is_current(job):
-            # A newer saved session must win without destroying the user's
-            # visible page. Only an explicit check may adopt its baseline.
-            job.session_conflict = True
-            job.pinnacle_verified = False
-            job.pinnacle_scope = {}
-            job.evidence = None
-            job.form_pending = False
-            job.retry_at = 0
-            job.deadline = float("inf")
-            job.status = "awaiting_manual"
-            self._set(job.account_id, job.status,
-                      "保存会话已被另一个任务更新；当前登录窗口保持打开，自动检查与同步已暂停。请点击验证会话重新核验。",
-                      last_checked=_now())
-            return
+        """Stop a stale browser check without overwriting a newer saved session."""
         try:
             account = self.store.get_account(job.account_id)
             if (account.get("status") in {"checking", "logging_in"}
@@ -272,9 +233,8 @@ class AuthService:
         except Exception:
             pass  # A deleted account must not terminate other browser sessions.
 
-    def _launch(self, background=False, headed=False):
-        browser = (getattr(self, "_pinnacle_browser", None) if headed else
-                   getattr(self, "_background_browser", None) if background else self._browser)
+    def _launch(self, background=False):
+        browser = self._background_browser if background else self._browser
         if browser and browser.is_connected():
             return browser
         try:
@@ -285,7 +245,7 @@ class AuthService:
             self._playwright = sync_playwright().start()
         headless_setting = os.environ.get("HD_REPORT_HEADLESS", "").strip().lower()
         headless = headless_setting not in {"0", "false", "no"} if headless_setting else sys.platform != "darwin"
-        options = {"headless": False if headed else True if background else headless, "timeout": 30000}
+        options = {"headless": True if background else headless, "timeout": 30000}
         executable = os.environ.get("HD_REPORT_BROWSER_EXECUTABLE", "")
         if executable:
             options["executable_path"] = executable
@@ -293,9 +253,7 @@ class AuthService:
             options["executable_path"] = "/usr/bin/chromium"
         try:
             browser = self._playwright.chromium.launch(**options)
-            if headed:
-                self._pinnacle_browser = browser
-            elif background:
+            if background:
                 self._background_browser = browser
             else:
                 self._browser = browser
@@ -317,8 +275,6 @@ class AuthService:
                             self._dispose(account_id)
                         elif action == "otp":
                             self._otp(account_id, payload)
-                        elif action == "reuse":
-                            self._reuse_pinnacle(account_id, check=bool((payload or {}).get("check")))
                         else:
                             self._begin(account_id, restore=action == "test",
                                         background=bool((payload or {}).get("background")))
@@ -334,7 +290,7 @@ class AuthService:
         finally:
             for account_id in list(self._jobs):
                 self._dispose(account_id)
-            for browser in (self._browser, self._background_browser, getattr(self, "_pinnacle_browser", None)):
+            for browser in (self._browser, self._background_browser):
                 if not browser:
                     continue
                 try:
@@ -349,9 +305,6 @@ class AuthService:
 
     def _begin(self, account_id, restore=False, background=False):
         account = self._account(account_id)
-        keep_open = account["kind"] == "pinnacle"
-        if keep_open:
-            background = False
         if not account.get("enabled", True):
             return
         if len(self._jobs) >= 8 and account_id not in self._jobs:
@@ -365,11 +318,7 @@ class AuthService:
             self._set(account_id, "idle", "尚无已保存会话，请先登录。")
             return
         base_url = account["base_url"].rstrip("/") + "/"
-        # A restored Pinnacle session enters the known report page directly;
-        # its login route may keep showing a form even with valid cookies.
-        entry_path = ("/partner-ui-v2/report-winloss-detail-v2" if keep_open and restore
-                      else account.get("login_path") or "/")
-        login_url = urljoin(base_url, entry_path)
+        login_url = urljoin(base_url, account.get("login_path") or "/")
         if _origin(base_url) != _origin(login_url):
             raise RuntimeError("登录路径必须属于账号配置的同一来源。")
         if stored and stored.get("auth_origin") != list(_origin(base_url)):
@@ -378,7 +327,7 @@ class AuthService:
         check_account = {**account, "status": "checking"} if not background else account
         if stored and account["kind"] == "crown_odds" and self._check_saved_member(check_account, stored):
             return
-        browser = self._launch(background=background, headed=True) if keep_open else self._launch(background=background)
+        browser = self._launch(background=background)
         context_args = {"viewport": {"width": 1100, "height": 800}, "ignore_https_errors": False}
         if stored:
             context_args["storage_state"] = stored.get("storage_state", {"cookies": [], "origins": []})
@@ -389,11 +338,8 @@ class AuthService:
         page = context.new_page()
         job = _Job(account_id, account, context, page, time.monotonic() + (35 if background else 300),
                    status="checking" if restore else "logging_in", uid=(stored or {}).get("uid", ""), restore=restore,
-                   background=background, session_saved=bool(existing_session), session_baseline=existing_session,
-                   keep_open=keep_open)
+                   background=background, session_saved=bool(existing_session), session_baseline=existing_session)
         self._jobs[account_id] = job
-        if keep_open:
-            page.bring_to_front()
         if stored:
             self._restore_member(job, stored)
             if (account["kind"] == "crown_odds"
@@ -671,9 +617,6 @@ class AuthService:
     def _observe_member_request(self, job, request):
         """Remember only the site's ordinary authenticated mem_online request."""
         try:
-            if job.account.get("kind") == "crown_admin":
-                self._observe_crown_admin_request(job, request)
-                return
             if (job.account.get("kind") != "crown_odds" or not self._is_current(job)
                     or request.method != "POST" or urlsplit(request.url).path != "/transform.php"):
                 return
@@ -713,192 +656,8 @@ class AuthService:
         except Exception as exc:
             self._diagnostic(job.account_id, "member_request", exc)
 
-    def _observe_crown_admin_request(self, job, request):
-        """Capture protocol fields from the site's own authenticated wager poll."""
-        if (not self._is_current(job) or request.method != "POST"
-                or urlsplit(request.url).path != "/transform.php"
-                or _origin(request.url) != _origin(job.account["base_url"])):
-            return
-        query = parse_qs(urlsplit(request.url).query, keep_blank_values=True)
-        body = parse_qs(request.post_data or "", keep_blank_values=True, strict_parsing=False)
-        def one_value(key):
-            values = query.get(key, []) + body.get(key, [])
-            valid = {value.strip() for value in values if isinstance(value, str) and value.strip()}
-            return next(iter(valid)) if len(valid) == 1 else ""
 
-        if body.get("p") == ["login_chk"]:
-            values = {value for value in (one_value("login_layer"), one_value("layer")) if value}
-            if len(values) == 1 and next(iter(values)) in ("co", "su", "ag"):
-                job.admin_login_layer = next(iter(values))
-            return
-        if (body.get("p") != ["get_wmc_list_bet"]
-                or not (job.admin_completion_pending or job.restore)):
-            return
 
-        uid = one_value("uid")
-        ver = one_value("ver")
-        langx = one_value("langx")
-        layer = one_value("login_layer")
-        if (not uid or len(uid) > 2048
-                or any(ord(char) < 32 or ord(char) == 127 for char in uid)):
-            return
-        ver = self._protocol_value(ver, r"[A-Za-z0-9._-]+", 96)
-        langx = self._protocol_value(langx, r"[A-Za-z]{2,3}(?:[-_][A-Za-z]{2,4})?", 16)
-        layer = layer or job.admin_login_layer or job.account.get("login_layer")
-        if not ver or not langx or layer not in ("co", "su", "ag"):
-            return
-        job.uid = uid
-        source = _origin(request.url)
-        hostname = f"[{source[1]}]" if ":" in source[1] else source[1]
-        default_port = 443 if source[0] == "https" else 80
-        job.admin_protocol = {
-            "origin": f"{source[0]}://{hostname}" + (f":{source[2]}" if source[2] != default_port else ""),
-            "ver": ver,
-            "langx": langx,
-            "login_layer": layer,
-        }
-        try:
-            headers = request.all_headers()
-        except Exception:
-            headers = {}
-        allowed_headers = {
-            "user-agent", "accept", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
-            "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "x-requested-with",
-        }
-        job.admin_protocol_headers = {
-            key.lower(): value[:512]
-            for key, value in headers.items()
-            if isinstance(key, str) and key.lower() in allowed_headers
-            and isinstance(value, str) and value and len(value) <= 512
-            and not any(ord(char) < 32 or ord(char) == 127 for char in value)
-        }
-        observed_user_agent = job.admin_protocol_headers.get("user-agent")
-        if observed_user_agent:
-            job.admin_protocol["user_agent"] = observed_user_agent
-
-    def _capture_crown_admin_protocol(self, job):
-        if job.admin_protocol.get("ver") and job.admin_protocol.get("login_layer") in ("co", "su", "ag"):
-            return
-        for frame in job.page.frames:
-            if not self._trusted_page(job, frame.url):
-                continue
-            try:
-                values = frame.evaluate("""() => {
-                    const root = window.top;
-                    return {
-                        ver: root.ver || '',
-                        langx: root.langx || document.documentElement.lang || '',
-                        uid: root.uid || root.UID || '',
-                        loginLayer: root.login_layer || root.layer || '',
-                        userAgent: navigator.userAgent || '',
-                    };
-                }""")
-            except Exception:
-                continue
-            if not isinstance(values, dict):
-                continue
-            uid = values.get("uid")
-            if (isinstance(uid, str) and uid and len(uid) <= 2048
-                    and not any(ord(char) < 32 or ord(char) == 127 for char in uid)):
-                job.uid = uid
-            ver = self._protocol_value(values.get("ver"), r"[A-Za-z0-9._-]+", 96)
-            langx = self._protocol_value(values.get("langx"), r"[A-Za-z]{2,3}(?:[-_][A-Za-z]{2,4})?", 16)
-            page_layer = values.get("loginLayer")
-            layer = (job.admin_login_layer
-                     or (page_layer if page_layer in ("co", "su", "ag") else "")
-                     or job.account.get("login_layer"))
-            if not ver or not langx or layer not in ("co", "su", "ag"):
-                continue
-            source = _origin(frame.url)
-            hostname = f"[{source[1]}]" if ":" in source[1] else source[1]
-            default_port = 443 if source[0] == "https" else 80
-            job.admin_protocol = {
-                "origin": f"{source[0]}://{hostname}" + (f":{source[2]}" if source[2] != default_port else ""),
-                "ver": ver,
-                "langx": langx,
-                "login_layer": layer,
-                "user_agent": str(values.get("userAgent", ""))[:512],
-            }
-            user_agent = job.admin_protocol["user_agent"]
-            if user_agent and not any(ord(char) < 32 or ord(char) == 127 for char in user_agent):
-                job.admin_protocol_headers = {"user-agent": user_agent}
-            return
-
-    def _probe_crown_admin_report(self, job):
-        """Verify read-only wager access inside the browser context that logged in."""
-        protocol = job.admin_protocol
-        if (not job.uid or not protocol.get("ver")
-                or protocol.get("login_layer") not in ("co", "su", "ag")
-                or _origin(protocol.get("origin", "")) != _origin(job.account["base_url"])):
-            return False, ""
-        try:
-            result = job.page.evaluate("""async ({ver, uid, layer, langx, maxBytes}) => {
-                const query = new URLSearchParams({ver});
-                const form = new URLSearchParams({
-                    p: 'get_wmc_list_bet', uid, login_layer: layer,
-                    langx, ver, totalBets: 'wmc', gtype: 'ALL', sel_maxid: '0'
-                });
-                const controller = new AbortController();
-                const timer = setTimeout(() => controller.abort(), 8000);
-                try {
-                    const response = await fetch('/transform.php?' + query.toString(), {
-                        method: 'POST', credentials: 'same-origin', signal: controller.signal,
-                        headers: {'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'},
-                        body: form.toString()
-                    });
-                    const reader = response.body.getReader();
-                    const chunks = [];
-                    let size = 0;
-                    while (true) {
-                        const {done, value} = await reader.read();
-                        if (done) break;
-                        size += value.byteLength;
-                        if (size > maxBytes) {
-                            await reader.cancel();
-                            return {httpOk: response.ok, oversized: true};
-                        }
-                        chunks.push(value);
-                    }
-                    const bytes = new Uint8Array(size);
-                    let offset = 0;
-                    for (const chunk of chunks) {
-                        bytes.set(chunk, offset);
-                        offset += chunk.byteLength;
-                    }
-                    const text = new TextDecoder().decode(bytes);
-                    const body = JSON.parse(text);
-                    if (!body || typeof body !== 'object' || Array.isArray(body))
-                        return {httpOk: response.ok};
-                    return {
-                        httpOk: response.ok,
-                        code: ['4X014', '4X013', 'm_rep'].includes(String(body.code || ''))
-                            ? String(body.code) : '',
-                        rejected: body.status === false || ['error', 'fail', 'failed', 'false']
-                            .includes(String(body.status || '').trim().toLowerCase()),
-                        hasMaxId: Object.prototype.hasOwnProperty.call(body, 'maxid'),
-                        hasWagers: Array.isArray(body.wagers)
-                    };
-                } catch (_) {
-                    return {httpOk: false};
-                } finally {
-                    clearTimeout(timer);
-                }
-            }""", {
-                "ver": protocol["ver"], "uid": job.uid,
-                "layer": protocol["login_layer"],
-                "langx": protocol.get("langx") or "zh-cn",
-                "maxBytes": CROWN_ADMIN_RESPONSE_BYTES,
-            })
-        except Exception as exc:
-            self._diagnostic(job.account_id, "admin_report_probe", exc)
-            return False, ""
-        if not isinstance(result, dict):
-            return False, ""
-        code = str(result.get("code", ""))
-        ok = (result.get("httpOk") is True and not result.get("oversized") and not result.get("rejected")
-              and code not in {"4X014", "4X013", "m_rep"}
-              and result.get("hasMaxId") is True and result.get("hasWagers") is True)
-        return ok, code
 
     def _accept_member_response(self, job, url, status, body, data):
         if self._jobs.get(job.account_id) is not job or not self._is_current(job):
@@ -940,12 +699,6 @@ class AuthService:
             'input[name="account"]', '#account', 'input[autocomplete="username"]',
             'input[name="loginName"]', '#loginName', 'input[name="loginname"]',
         ]
-        if job.account["kind"] == "pinnacle":
-            username_selectors.extend([
-                'input[placeholder*="用户名"]', 'input[placeholder*="用戶名"]',
-                'input[placeholder*="账号"]', 'input[placeholder*="Username" i]',
-                'input[aria-label*="用户名"]', 'input[aria-label*="Username" i]',
-            ])
         password_selectors = [
             'input[name="password"]', 'input[name="pwd"]', '#password', '#pwd',
             'input[type="password"]:not([name="safe"]):not([name="pwd_safe"])',
@@ -953,32 +706,6 @@ class AuthService:
         for frame in job.page.frames:
             if _origin(frame.url) != _origin(job.account["base_url"]):
                 continue
-            # Empty legacy/API selections follow the normal page. Explicit
-            # crown choices map 登入1/2/3 to the site's A/B/C controls.
-            value = job.account.get("login_layer", "")
-            if job.account["kind"] == "crown_admin" and value:
-                layer = self._visible_locator(frame, ['select[name="login_layer"]', 'select[name="selLayer"]', '#selLayer'])
-                layer_name = {"co": "A", "su": "B", "ag": "C"}[value]
-                if layer is None:
-                    layer_button = self._visible_locator(frame, [f'#btn_{layer_name}', f'[name="btn_{layer_name}"]'])
-                    if layer_button is None:
-                        if self._visible_locator(frame, username_selectors) is not None:
-                            self._manual(job, "未识别皇冠后台登入方式，请在本机浏览器确认后完成登录。")
-                            return
-                        continue
-                    layer_button.click()
-                else:
-                    selected = False
-                    for option in (value, layer_name):
-                        try:
-                            layer.select_option(value=option, timeout=700)
-                            selected = True
-                            break
-                        except Exception:
-                            continue
-                    if not selected:
-                        self._manual(job, "页面登录层级与配置不匹配，请在浏览器选择后完成登录。")
-                        return
             # Layer selection may replace the form or reveal another panel.
             # Resolve the currently visible fields after the site's own switch.
             username = self._visible_locator(frame, username_selectors)
@@ -1025,10 +752,7 @@ class AuthService:
                 continue
             username.fill(job.account["username"])
             password_input.fill(password)
-            # 登入3 has no safety field, including after editing an account
-            # which still has an encrypted safety password from 登入1/2.
-            needs_safe = not (job.account["kind"] == "crown_admin" and value == "ag")
-            if needs_safe and credentials.get("safe_password"):
+            if credentials.get("safe_password"):
                 safe_input = self._visible_locator(frame, ['input[name="safe"]', '#safe', '#pwd_safe', 'input[name="pwd_safe"]', 'input[name="safe_password"]'])
                 if safe_input is None:
                     self._manual(job, "已配置安全密码，但页面未找到对应输入框，请在本机浏览器确认。")
@@ -1090,184 +814,35 @@ class AuthService:
             evidence = parse_login_response(job.account["kind"], response.url,
                                             response.status, response.text(), request_data)
             if evidence:
-                if job.account["kind"] == "crown_admin" and evidence.status == "authenticated":
-                    self._observe_crown_admin_request(job, request)
                 job.evidence = evidence
         except Exception:
             # Network failures are shown as timeouts/manual checks, never expose
             # response bodies or request values in exception/log output.
             return
 
-    def _probe_pinnacle_session(self, job):
-        """Confirm identity and read-only order access with this page's cookies."""
-        job.pinnacle_verified = False
-        job.pinnacle_scope = {}
-        if not self._is_current(job) or not self._trusted_page(job, job.page.url):
-            return False
-        from .storage import validate_target_url
-        base = job.account["base_url"].rstrip("/")
-        headers = {"Accept": "application/json, text/plain, */*", "Origin": base,
-                   "Referer": base + "/partner-ui-v2/report-winloss-detail-v2"}
 
-        def read_body(response):
-            try:
-                if not 200 <= response.status < 300:
-                    return None
-                if len(response.body()) > MAX_RESPONSE_BYTES:
-                    return None
-                value = response.json()
-                if not isinstance(value, dict):
-                    return None
-                from scripts.poll_pinnacle_orders import _session_failure_marker
-                if _session_failure_marker(value):
-                    return None
-                code = value.get("statusCodeValue", 200)
-                if isinstance(code, bool) or not 200 <= int(code) < 300:
-                    return None
-                value = value.get("body", value)
-                return value if isinstance(value, dict) else None
-            finally:
-                response.dispose()
 
-        try:
-            profile_url = base + "/partner-account/ddd/user-info/login-user/profile"
-            orders_url = base + "/partner-reporting/ddd/common/bet-list/v2"
-            if not validate_target_url(profile_url) or not validate_target_url(orders_url):
-                return False
-            body = read_body(job.context.request.get(
-                profile_url, headers=headers, timeout=8000, max_redirects=0))
-            profile = (body or {}).get("profile")
-            if not isinstance(profile, dict):
-                return False
-            user_id, user_code = profile.get("userId"), profile.get("userCode")
-            # loginId identifies the configured sign-in; userCode is the
-            # business scope used by the order API and may be different.
-            login_id = profile.get("loginId", user_code)
-            if (isinstance(user_id, bool) or not str(user_id).isdigit() or int(user_id) <= 0
-                    or not isinstance(user_code, str) or not user_code.strip()
-                    or not isinstance(login_id, str) or not login_id.strip()
-                    or login_id.strip().casefold() != job.account["username"].strip().casefold()):
-                return False
-            user_code, login_id = user_code.strip(), login_id.strip()
-            payload = {"betListType": "DETAIL", "ownerUserId": str(user_id),
-                       "playerUserId": int(user_id), "selectedUserCode": user_code,
-                       "product": "SB", "status": "OPEN",
-                       "paging": {"pageNumber": 1, "rowsPerPage": 1}}
-            orders = read_body(job.context.request.post(
-                orders_url, headers=headers, data=payload, timeout=8000, max_redirects=0))
-            if (not isinstance(orders, dict) or not isinstance(orders.get("data"), list)
-                    or not isinstance(orders.get("paging"), dict)):
-                return False
-            total = orders["paging"].get("totalItems")
-            if isinstance(total, bool) or not str(total).isdigit():
-                return False
-            job.pinnacle_scope = {"user_id": int(user_id), "user_code": user_code,
-                                  "login_id": login_id}
-            job.pinnacle_verified = True
-            return True
-        except Exception as exc:
-            self._diagnostic(job.account_id, "check_page", exc)
-            return False
 
-    def _check_pinnacle_page(self, job):
-        if job.session_conflict:
-            return
-        if not self._probe_pinnacle_session(job):
-            job.status = "awaiting_manual"
-            self._set(job.account_id, job.status,
-                      "登录浏览器保持打开；请完成登录或验证。尚未确认同一会话可以读取订单。", last_checked=_now())
-            return
-        job.status = "authenticated"
-        job.form_pending = False
-        job.login_saved = not job.restore
-        if not self._persist_verified(job):
-            return
-        job.next_session_sync = time.monotonic() + 5
-        self._set(job.account_id, "authenticated",
-                  "有头浏览器保持打开；已用该会话通过身份和只读订单接口验证，Cookie 已加密保存。", last_checked=_now())
-        self._log(job.account_id, "test" if job.restore else "login", "authenticated",
-                  "平博浏览器会话已通过身份和只读订单接口验证，登录窗口保持打开。")
-
-    def _sync_pinnacle_session(self, job):
-        """Only this worker writes browser snapshots; collectors read them."""
-        if job.session_conflict:
-            return
-        if time.monotonic() < job.next_session_sync:
-            return
-        job.next_session_sync = time.monotonic() + 5
-        if not self._session_baseline_current(job):
-            self._end_stale_session_job(job)
-            return
-        if not self._trusted_page(job, job.page.url):
-            job.pinnacle_verified = False
-            self._manual(job, "登录窗口已离开配置站点；请返回平博后台后验证会话。")
-            return
-        for frame in job.page.frames:
-            if self._trusted_page(job, frame.url) and self._otp_challenge(frame):
-                job.pinnacle_verified = False
-                self._check_page(job)
-                return
-            if self._trusted_page(job, frame.url) and self._visible_locator(frame, ['input[type="password"]']) is not None:
-                job.pinnacle_verified = False
-                job.status = "awaiting_manual"
-                self._set(job.account_id, "expired", "平博窗口已返回登录页，请在保留的浏览器中重新登录。", last_checked=_now())
-                return
-        state = job.context.storage_state()
-        baseline = job.session_baseline if isinstance(job.session_baseline, dict) else {}
-        if state != baseline.get("storage_state"):
-            self._persist_verified(job)
-
-    def _reuse_pinnacle(self, account_id, check=False):
-        job = self._jobs.get(account_id)
-        if not job or not job.keep_open or job.page.is_closed():
-            self._begin(account_id, restore=bool(self.store.load_session(account_id)))
-            return
-        job.page.bring_to_front()
-        if job.session_conflict:
-            if not check or not self._is_current(job):
-                return
-            try:
-                baseline = deepcopy(self.store.load_session(account_id))
-            except Exception:
-                self._set(account_id, "awaiting_manual",
-                          "当前登录窗口保持打开；读取最新保存会话失败，请稍后再次验证。", last_checked=_now())
-                return
-            job.session_baseline = baseline
-            job.session_conflict = False
-            job.pinnacle_verified = False
-            job.pinnacle_scope = {}
-            job.evidence = None
-            job.status = "checking"
-        if not self._trusted_page(job, job.page.url):
-            login_url = urljoin(job.account["base_url"].rstrip("/") + "/", job.account.get("login_path") or "/")
-            job.page.goto(login_url, wait_until="domcontentloaded")
-        if check or job.status not in {"logging_in", "awaiting_otp", "authenticated"}:
-            self._check_page(job)
-            if not check and job.status == "awaiting_manual" and self._trusted_page(job, job.page.url):
-                self._fill_login(job)
 
     def _save(self, job):
         if not self._is_current(job):
             return
         if job.session_conflict or not self._session_baseline_current(job):
             raise _SessionChanged("saved session changed")
-        if job.account["kind"] == "crown_odds":
-            for frame in job.page.frames:
-                if not self._trusted_page(job, frame.url):
-                    continue
-                try:
-                    job.session_storage[frame.evaluate("location.origin")] = frame.evaluate(
-                        "() => Object.fromEntries(Object.entries(sessionStorage))")
-                except Exception:
-                    pass  # A frame can be replaced while the site redirects.
-            if self._trusted_page(job, job.page.url):
-                if job.member_resume_query.get("uid") != job.uid:
-                    job.member_resume_query = {}
-                self._capture_member_resume(job, job.page.url)
-                if not job.member_resume_query:
-                    job.resume_url = urlsplit(job.page.url)._replace(query="", fragment="").geturl()
-        elif job.account["kind"] == "crown_admin" and not job.admin_protocol.get("ver"):
-            self._capture_crown_admin_protocol(job)
+        for frame in job.page.frames:
+            if not self._trusted_page(job, frame.url):
+                continue
+            try:
+                job.session_storage[frame.evaluate("location.origin")] = frame.evaluate(
+                    "() => Object.fromEntries(Object.entries(sessionStorage))")
+            except Exception:
+                pass  # A frame can be replaced while the site redirects.
+        if self._trusted_page(job, job.page.url):
+            if job.member_resume_query.get("uid") != job.uid:
+                job.member_resume_query = {}
+            self._capture_member_resume(job, job.page.url)
+            if not job.member_resume_query:
+                job.resume_url = urlsplit(job.page.url)._replace(query="", fragment="").geturl()
         expected = {"expected_revision": job.account["revision"]} if job.account.get("revision") is not None else {}
         try:
             storage_state = job.context.storage_state()
@@ -1283,15 +858,9 @@ class AuthService:
             "session_storage": job.session_storage,
             "member_protocol": job.member_protocol,
             "member_resume_query": job.member_resume_query,
-            "admin_protocol": job.admin_protocol if job.account["kind"] == "crown_admin" else {},
-            "admin_protocol_headers": (job.admin_protocol_headers
-                                        if job.account["kind"] == "crown_admin" else {}),
             "member_ui_verified": job.member_ui_verified,
             "saved_at": _now(),
-            "business_verified": bool(job.account["kind"] == "pinnacle" and job.pinnacle_verified),
         }
-        if job.account["kind"] == "pinnacle":
-            session["pinnacle_scope"] = dict(job.pinnacle_scope)
         try:
             update_last_login = job.login_saved and not job.login_recorded
             save_options = {"update_last_login": update_last_login, **expected}
@@ -1324,11 +893,7 @@ class AuthService:
         except _SessionSaveError as exc:
             self._diagnostic(job.account_id, "save_session", exc)
             self._set(job.account_id, "error", "登录界面已验证，但会话保存失败；现有会话未覆盖。", last_checked=_now())
-            if job.keep_open:
-                job.pinnacle_verified = False
-                job.status = "awaiting_manual"
-            else:
-                self._dispose(job.account_id)
+            self._dispose(job.account_id)
             return False
 
     def _otp(self, account_id, code):
@@ -1435,15 +1000,8 @@ class AuthService:
             return
         trusted_frames = [frame for frame in job.page.frames if self._trusted_page(job, frame.url)]
         if any(self._otp_challenge(frame) for frame in trusted_frames):
-            if job.account["kind"] == "pinnacle":
-                job.pinnacle_verified = False
             if job.status != "awaiting_otp":
                 job.deadline = time.monotonic() + 600
-            if job.account["kind"] == "crown_admin" and not job.admin_completion_pending:
-                job.admin_completion_pending = True
-                job.admin_ui_verified_at = 0
-                job.admin_ui_url = ""
-                job.admin_ui_storage_state = {}
             job.status = "awaiting_otp"
             if not self._auto_submit_totp(job):
                 self._set(job.account_id, job.status, "网站要求输入身份验证器动态码，请填写本次有效验证码。")
@@ -1456,41 +1014,18 @@ class AuthService:
             job.status = "logging_in"
             self._set(job.account_id, job.status, "已离开动态码验证页，正在确认登录结果。")
 
-        if job.account["kind"] == "pinnacle":
-            for frame in trusted_frames:
-                if self._visible_locator(frame, ['input[type="password"]']) is not None:
-                    self._manual(job, "平博有头浏览器保持打开，请在该窗口完成登录；成功后自动检查并保存会话。")
-                    return
-            self._check_pinnacle_page(job)
-            return
-
         for frame in trusted_frames:
-            if (job.account["kind"] == "crown_odds"
-                    and self._dismiss_member_quick_password_prompt(frame)):
+            if self._dismiss_member_quick_password_prompt(frame):
                 return
             password_field = self._visible_locator(frame, ['input[type="password"]'])
             if password_field is not None:
-                if job.admin_completion_pending:
-                    job.admin_ui_verified_at = 0
-                    job.admin_ui_url = ""
-                    job.admin_ui_storage_state = {}
                 if job.background:
                     job.restore = False
                     job.status = "expired"
                     self._set(job.account_id, "expired", "后台检查确认页面已返回登录表单；会话已失效。", last_checked=_now())
                     self._dispose(job.account_id)
                     return
-                if job.restore and job.account["kind"] == "crown_admin":
-                    # A session check must never turn into a credential login.
-                    # Keep the old snapshot for inspection and let an explicit
-                    # login action start a fresh authentication flow.
-                    job.restore = False
-                    job.status = "expired"
-                    self._set(job.account_id, "expired", "保存会话已返回登录表单；原会话已保留，请显式重新登录。", last_checked=_now())
-                    self._dispose(job.account_id)
-                    return
                 if otp_was_pending and not job.restore:
-                    job.admin_completion_pending = False
                     self._manual(job, "动态码页面已离开，但仍返回登录表单，尚未确认成功；请查看浏览器提示。")
                     return
                 if job.restore and _origin(frame.url) == _origin(job.account["base_url"]):
@@ -1524,27 +1059,17 @@ class AuthService:
                 'a:has-text("Logout")', 'button:has-text("Logout")',
                 '[aria-label="Logout"]', '[title="登出"]', '[title="退出登录"]',
             ])
-            member_signed_in = (job.account["kind"] == "crown_odds"
-                                and job.member_authenticated and job.uid
+            member_signed_in = (job.member_authenticated and job.uid
                                 and self._member_signed_in(frame))
             entry_page = _origin(frame.url) == _origin(job.account["base_url"])
             confirmed_logout = logout is not None and (entry_page or (job.member_authenticated and job.uid))
-            admin_dashboard = (job.account["kind"] == "crown_admin" and entry_page
-                               and self._crown_admin_dashboard(frame))
-            if job.account["kind"] == "crown_admin":
-                if admin_dashboard:
-                    job.admin_completion_pending = True
-                    self._finish_crown_admin_login(job)
-                    return
-                if job.admin_completion_pending:
-                    return
-            if (confirmed_logout and job.account["kind"] != "crown_admin") or member_signed_in:
+            if confirmed_logout or member_signed_in:
                 job.status = "authenticated"
-                job.member_ui_verified = bool(job.account["kind"] == "crown_odds")
+                job.member_ui_verified = True
                 if not job.ui_verified_at:
                     job.ui_verified_at = time.monotonic()
                 job.login_saved = not job.restore and not job.background
-                if (job.background and job.account["kind"] == "crown_odds" and not job.member_protocol
+                if (job.background and not job.member_protocol
                         and time.monotonic() - job.ui_verified_at < 10
                         and time.monotonic() < job.deadline):
                     # Let the normal member page emit its own metadata-bearing request.
@@ -1561,60 +1086,6 @@ class AuthService:
             if not job.background:
                 self._set(job.account_id, "session_received", "已载入保存会话，但页面不足以确认仍然有效；稍后可重新检查。", last_checked=_now())
 
-    def _finish_crown_admin_login(self, job):
-        """Save only after the same-origin signed-in page and browser state settle."""
-        if time.monotonic() < job.admin_report_retry_at:
-            return
-        self._capture_crown_admin_protocol(job)
-        try:
-            if job.page.evaluate("() => document.readyState") != "complete":
-                job.admin_ui_verified_at = 0
-                job.admin_ui_url = ""
-                job.admin_ui_storage_state = {}
-                return
-            state = job.context.storage_state()
-        except Exception:
-            job.admin_ui_verified_at = 0
-            job.admin_ui_url = ""
-            job.admin_ui_storage_state = {}
-            return
-
-        now = time.monotonic()
-        current_url = job.page.url
-        if (not job.admin_ui_verified_at or current_url != job.admin_ui_url
-                or state != job.admin_ui_storage_state):
-            job.admin_ui_verified_at = now
-            job.admin_ui_url = current_url
-            job.admin_ui_storage_state = state
-            return
-        if now - job.admin_ui_verified_at < 0.5:
-            return
-
-        job.admin_report_attempts += 1
-        probe_ok, probe_code = self._probe_crown_admin_report(job)
-        if not probe_ok:
-            if (probe_code not in {"4X014", "4X013"}
-                    and job.admin_report_attempts < _CROWN_ADMIN_PROBE_ATTEMPTS
-                    and now < job.deadline):
-                job.admin_report_retry_at = time.monotonic() + 0.5 * (2 ** (job.admin_report_attempts - 1))
-                job.status = "logging_in"
-                self._set(job.account_id, "logging_in",
-                          "皇冠页面已登录，正在等待订单接口就绪并自动重试；原会话保留。")
-                return
-            message = ("皇冠页面显示已登录，但只读订单接口拒绝当前会话；原会话未覆盖。请检查登录层级和报表权限。"
-                       if probe_code in {"4X014", "4X013"}
-                       else "皇冠页面显示已登录，但只读订单接口尚未确认；原会话未覆盖，请稍后重试。")
-            self._set(job.account_id, "session_received", message, last_checked=_now())
-            self._log(job.account_id, "report_probe", "error", message)
-            self._dispose(job.account_id)
-            return
-
-        job.status = "authenticated"
-        job.login_saved = not job.restore and not job.background
-        if not self._persist_verified(job):
-            return
-        self._set(job.account_id, "authenticated", "皇冠登录成功，订单读取权限已验证，会话已保存。", last_checked=_now())
-        self._dispose(job.account_id)
 
     def _dismiss_member_quick_password_prompt(self, frame):
         try:
@@ -1632,19 +1103,6 @@ class AuthService:
         except Exception:
             return False
 
-    def _crown_admin_dashboard(self, frame):
-        """Require several private dashboard sections before confirming Crown admin UI."""
-        try:
-            text = frame.locator("body").inner_text(timeout=700)
-        except Exception:
-            return False
-        markers = (
-            r"(?:\bPerformance Overview\b|绩效概况)",
-            r"(?:\bAccount Overview\b|账号概况|帐号概况)",
-            r"(?:\bAvailable Balance\b|可用额度|剩余额度)",
-            r"(?:\bCredit\b|信用额度)",
-        )
-        return all(re.search(marker, text, re.IGNORECASE) for marker in markers)
 
     def _member_signed_in(self, frame):
         """The observed member header hides logout inside the account menu."""
@@ -1688,9 +1146,6 @@ class AuthService:
                 job.page.wait_for_timeout(30)
                 if job.session_conflict:
                     continue
-                if job.keep_open and job.status == "authenticated" and job.pinnacle_verified and not job.evidence:
-                    self._sync_pinnacle_session(job)
-                    continue
                 if job.background and job.member_ui_verified and job.status == "authenticated":
                     if job.member_protocol or time.monotonic() - job.ui_verified_at >= 10:
                         # The page may have returned to login while metadata was pending.
@@ -1701,22 +1156,12 @@ class AuthService:
                 if job.evidence:
                     evidence, job.evidence = job.evidence, None
                     job.status = evidence.status
-                    if job.keep_open:
-                        job.pinnacle_verified = False
-                    if job.keep_open and evidence.status in {"authenticated", "session_received"}:
-                        # OTP success can precede the redirect and final cookies.
-                        # Keep the page and verify its real order access first.
-                        job.status = "checking"
-                        job.form_pending = False
-                        job.next_screenshot = 0
-                        self._set(account_id, "checking", "认证响应已通过，正在等待页面完成并验证订单会话。")
-                        continue
                     if evidence.uid:
                         job.uid = evidence.uid
-                        if job.account["kind"] == "crown_odds" and evidence.status == "session_received":
+                        if evidence.status == "session_received":
                             job.member_authenticated = True
                     if evidence.status in {"authenticated", "session_received"}:
-                        if job.account["kind"] == "crown_odds" and evidence.status == "session_received":
+                        if evidence.status == "session_received":
                             # The login response precedes the member-domain
                             # handoff and final browser state. Keep the account
                             # busy and the old snapshot until the signed-in UI
@@ -1726,19 +1171,6 @@ class AuthService:
                             job.next_screenshot = 0
                             self._set(account_id, "logging_in", "会员登录响应已成功，正在等待会员页面完成并保存完整会话。")
                             self._log(account_id, "login", "logging_in", "会员登录响应已成功，等待页面完成会话。")
-                            continue
-                        if job.account["kind"] == "crown_admin" and evidence.status == "authenticated":
-                            # login_chk confirms credentials, while the site's
-                            # normal success callback may still be setting cookies.
-                            job.admin_completion_pending = True
-                            job.admin_ui_verified_at = 0
-                            job.admin_ui_url = ""
-                            job.admin_ui_storage_state = {}
-                            job.admin_report_attempts = 0
-                            job.admin_report_retry_at = 0
-                            job.status = "logging_in"
-                            self._set(account_id, "logging_in", "登录响应已成功，正在等待皇冠页面完成登录并稳定会话。")
-                            self._log(account_id, "login", "logging_in", "登录响应已成功，等待页面完成会话。")
                             continue
                         job.login_saved = not job.restore and not job.background
                         if not self._persist_verified(job):
@@ -1750,11 +1182,6 @@ class AuthService:
                             continue
                     else:
                         self._set(account_id, evidence.status, evidence.message)
-                if job.admin_completion_pending and job.status != "awaiting_otp":
-                    job.stage = "check_page"
-                    self._check_page(job)
-                    if self._jobs.get(account_id) is not job:
-                        continue
                 if time.monotonic() >= job.next_screenshot:
                     job.next_screenshot = time.monotonic() + 3
                     if job.status in {"logging_in", "awaiting_manual"} and job.form_pending:
@@ -1776,10 +1203,7 @@ class AuthService:
                     except Exception:
                         pass  # A preview failure must not destroy a valid login.
                 if time.monotonic() >= job.deadline:
-                    if job.keep_open:
-                        job.deadline = float("inf")
-                        self._manual(job, "登录浏览器保持打开，请继续完成登录或验证；完成后会自动保存可用会话。")
-                    elif job.background:
+                    if job.background:
                         self._fail(account_id, "后台检查超过时限；已保留原会话，稍后重试。")
                     elif job.status in {"authenticated", "session_received"}:
                         self._persist_verified(job)
@@ -1829,16 +1253,6 @@ class AuthService:
             self._check_page(job)
 
     def _fail(self, account_id, message):
-        live = self._jobs.get(account_id)
-        if live and live.keep_open and self._is_current(live):
-            try:
-                if not live.page.is_closed():
-                    live.form_pending = False
-                    self._manual(live, "登录暂未完成，浏览器保持打开；请查看页面提示后继续，或重新验证会话。")
-                    self._log(account_id, "login", "awaiting_manual", "平博登录暂未完成，已保留有头窗口供继续操作。")
-                    return
-            except Exception:
-                pass
         try:
             job = self._jobs.get(account_id)
             if job and not self._is_current(job):

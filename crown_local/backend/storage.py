@@ -1,4 +1,4 @@
-"""Local two-database account storage; public projections never contain credentials."""
+"""Local Crown account storage; public projections never contain credentials."""
 from __future__ import annotations
 
 import ipaddress
@@ -22,8 +22,8 @@ import uuid
 from cryptography.fernet import Fernet, InvalidToken
 from .totp import normalize_secret as normalize_totp_secret
 
-KINDS = {'pinnacle': 'pinnacle.sqlite3', 'crown_admin': 'crown.sqlite3', 'crown_odds': 'crown.sqlite3'}
-DEFAULT_PATHS = {'pinnacle': '/partner/zh-cn/login', 'crown_admin': '/', 'crown_odds': '/'}
+KINDS = {'crown_odds': 'crown.sqlite3'}
+DEFAULT_PATHS = {'crown_odds': '/'}
 AUTHENTICATED = {'authenticated'}
 BUSY = {'logging_in', 'awaiting_otp', 'awaiting_manual', 'checking'}
 _FAKE_IP_NETWORK = ipaddress.ip_network('198.18.0.0/15')
@@ -198,12 +198,15 @@ class Vault:
         if sys.platform == 'darwin':
             import keyring
             identity = str(Path(directory).resolve())
-            # Use a project-specific Keychain namespace so this account store
-            # cannot reuse credentials or encryption keys from another app.
-            key = keyring.get_password('pingbo-request', identity)
+            # Keep the master key under a path-independent Keychain identity so
+            # moving the project does not make existing encrypted data unreadable.
+            key = keyring.get_password('crown-odds-terminal', 'master-key-v1')
+            if key is None:
+                # Migrate projects created before the stable namespace existed.
+                key = keyring.get_password('pingbo-request', identity)
             if key is None:
                 key = Fernet.generate_key().decode()
-                keyring.set_password('pingbo-request', identity, key)
+            keyring.set_password('crown-odds-terminal', 'master-key-v1', key)
             self.backend = 'macOS Keychain'
         else:
             # Development fallback. Never silently use a public/world-readable key.
@@ -268,7 +271,7 @@ class Store:
             connection.close()
 
     def _initialize(self):
-        for kind in ('pinnacle', 'crown_admin'):
+        for kind in ('crown_odds',):
             with self._db(kind) as c:
                 c.executescript('''
                 CREATE TABLE IF NOT EXISTS accounts (
@@ -294,7 +297,7 @@ class Store:
             os.chmod(self.directory / KINDS[kind], 0o600)
 
     def _find(self, account_id):
-        for kind in ('pinnacle', 'crown_admin'):
+        for kind in ('crown_odds',):
             with self._db(kind) as c:
                 row = c.execute('SELECT * FROM accounts WHERE id=?', (account_id,)).fetchone()
             if row:
@@ -313,7 +316,7 @@ class Store:
 
     def accounts(self):
         rows = []
-        for kind in ('pinnacle', 'crown_admin'):
+        for kind in ('crown_odds',):
             with self._db(kind) as c:
                 rows.extend(self._public(dict(r)) for r in c.execute('SELECT * FROM accounts ORDER BY created_at,id'))
         return sorted(rows, key=lambda x: (x['created_at'], x['id']))
@@ -584,36 +587,22 @@ class Store:
 
     def add_log(self, kind, account_id, action, status, message):
         if kind not in KINDS:
-            kind='pinnacle'
+            kind='crown_odds'
         with self._db(kind) as c:
             c.execute('INSERT INTO logs(created_at,kind,account_id,action,status,message) VALUES(?,?,?,?,?,?)',(now(),kind,account_id,str(action)[:60],str(status)[:40],str(message)[:300]))
             c.execute('DELETE FROM logs WHERE id NOT IN (SELECT id FROM logs ORDER BY id DESC LIMIT 1000)')
 
     def logs(self):
         logs=[]
-        for kind in ('pinnacle','crown_admin'):
+        for kind in ('crown_odds',):
             with self._db(kind) as c:
                 logs.extend(dict(r) for r in c.execute('SELECT created_at,kind,account_id,action,status,message FROM logs ORDER BY id DESC LIMIT 100'))
         return sorted(logs,key=lambda x:x['created_at'],reverse=True)[:100]
 
     def settings(self):
         defaults={'quote_retry_seconds':60,'sync_interval':60,'page_refresh_seconds':15}
-        with self._db('pinnacle') as c:
+        with self._db('crown_odds') as c:
             for r in c.execute('SELECT * FROM settings'):
                 if r['key'] in defaults:
                     defaults[r['key']]=json.loads(r['value'])
         return defaults
-
-    def update_settings(self, payload):
-        limits={'quote_retry_seconds':(5,300),'sync_interval':(15,3600),'page_refresh_seconds':(5,300)}
-        if set(payload)-set(limits):
-            raise ValueError('存在不支持的设置字段')
-        for k,v in payload.items():
-            low,high=limits[k]
-            if type(v) is not int or not low<=v<=high:
-                raise ValueError('设置应为允许范围内的整数秒')
-        with self._db('pinnacle') as c:
-            for k,v in payload.items():
-                c.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',(k,json.dumps(v)))
-        self.add_log('pinnacle',None,'settings_saved','success','运行参数已保存；订单采集尚未接入')
-        return self.settings()

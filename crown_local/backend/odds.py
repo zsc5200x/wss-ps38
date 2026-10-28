@@ -1,8 +1,8 @@
 """Shared odds-format conversion helpers.
 
-The upstream APIs can return several display formats, while this project
-calculates combined water in Hong Kong odds. Keep the conversion in one
-place so the report, quote worker, and Telegram output use the same rules.
+The Crown member site can return several display formats. Convert every
+supported value to positive Hong Kong water in one place so all Crown
+market views use the same rules.
 """
 from __future__ import annotations
 

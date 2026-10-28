@@ -2,7 +2,6 @@
 .env
 .env.*
 !.env.example
-/PINNACLE_LOGIN.md
 /data/
 *.sqlite3
 *.sqlite3-*
@@ -12,25 +11,16 @@
 *.key
 *.tmp
 
-# 本地环境与缓存
+# 本地环境、运行目录与缓存
 .venv/
 venv/
+.run/
 __pycache__/
 *.py[cod]
 .DS_Store
-
-# 浏览器自动化状态与生成截图
 /.playwright-mcp/
-/.taste-skill/
-/artifacts/
-/combined-ui-verified.png
-/work/
 
 # 编辑器备份
 *.backup*
 *.bak*
 *.orig
-
-# 项目目录中的独立克隆
-/hd-crown-ps38/
-/scanner-schemas/
