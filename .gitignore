@@ -26,6 +26,6 @@ league-radar-desktop.png
 .playwright-mcp/
 *.bak.*
 
-# Crown has its own Git repository. Keep the parent repository from treating it
-# as an accidental embedded repository or sweeping its local session data in.
-crown/
+# Temporary local backups used while consolidating nested repositories.
+.crown-worktree-backup/
+.crown-git-backup/
