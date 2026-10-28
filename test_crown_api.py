@@ -45,6 +45,8 @@ class CrownApiTests(unittest.TestCase):
         self.assertEqual(headers["Cache-Control"], "no-store, no-cache, must-revalidate")
         self.assertIn("皇冠赛事", body)
         self.assertIn('href="/crown"', body)
+        self.assertIn('href="/crown/static/app.css"', body)
+        self.assertIn('src="/crown/static/app.js"', body)
         for forbidden in ("同场对照", "/combined", "平博联赛", "pinnacleLoginForm"):
             self.assertNotIn(forbidden, body)
 
@@ -52,8 +54,21 @@ class CrownApiTests(unittest.TestCase):
         status, _headers, body = self.request("GET", "/crown?embed=1")
         self.assertEqual(status, 200)
         self.assertIn('<body class="crown-embedded">', body)
-        self.assertIn("crown:command", body)
-        self.assertIn("body.crown-embedded .topbar", body)
+        self.assertIn('src="/crown/static/app.js"', body)
+
+        status, headers, script = self.request("GET", "/crown/static/app.js")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "text/javascript; charset=utf-8")
+        self.assertIn("crown:command", script)
+
+        status, headers, stylesheet = self.request("GET", "/crown/static/app.css")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "text/css; charset=utf-8")
+        self.assertIn("body.crown-embedded .topbar", stylesheet)
+
+    def test_unknown_crown_static_asset_is_rejected(self):
+        status, _headers, _body = self.request("GET", "/crown/static/../app.py")
+        self.assertEqual(status, 404)
 
     def test_crown_event_endpoints_remain_available(self):
         for path in ("/api/crown/events", "/api/crown/events?compact=1"):
