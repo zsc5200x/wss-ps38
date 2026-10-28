@@ -108,13 +108,13 @@
       <div class="login-status"><span class="login-status-indicator" id="loginIndicator"></span><div><div class="login-status-title" id="loginStatusTitle">正在检查登录会话</div><div class="login-status-copy" id="loginStatusCopy">登录成功后，当前页面会自动轮询皇冠赛事和盘口数据。</div></div></div>
       <div class="login-actions"><button class="action-button primary" id="checkCrownSession" type="button">检查全部会话</button></div>
       <form class="account-form" id="crownAccountForm">
-        <label>域名或登录地址<input id="crownLoginUrl" name="login_url" placeholder="例如 https://example.com" required autocomplete="url"></label>
+        <label>域名或登录地址<input id="crownLoginUrl" name="login_url" placeholder="例如 https://example.com" required autocomplete="url" data-dialog-autofocus></label>
         <label>登录账号<input id="crownUsername" name="username" required autocomplete="username"></label>
         <label>登录密码<input id="crownPassword" name="password" type="password" required autocomplete="current-password"></label>
         <label>TOTP 密钥（可选）<input id="crownTotp" name="totp_secret" autocomplete="off"></label>
         <div class="account-form-actions"><button class="action-button primary" type="submit">添加账号并登录</button><span class="account-form-status" id="crownAccountFormStatus"></span></div>
       </form>
-      <div class="account-list"><div class="account-list-title">当前项目保存的皇冠账号</div><div id="crownAccounts"><div class="account-empty">正在读取账号…</div></div></div>
+      <div class="account-list"><div class="account-list-title">当前项目保存的皇冠账号</div><div class="account-list-status" id="crownAccountsStatus" role="status" aria-live="polite"></div><div id="crownAccounts"><div class="account-empty">正在读取账号…</div></div></div>
       <p class="login-help">账号配置、加密凭据和浏览器会话全部保存在当前项目的 data 目录及本机 Keychain 中。</p>
     </div>
   </section>

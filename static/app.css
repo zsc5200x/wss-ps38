@@ -202,6 +202,10 @@ h1,h2,h3,p{margin:0}
 .moneyline-cell strong{color:var(--text);font-family:var(--font-mono);font-size:.86rem;font-variant-numeric:tabular-nums;font-weight:550}
 .modal-backdrop,.settings-modal{position:fixed;inset:0;z-index:30;display:none;align-items:flex-start;justify-content:center;padding:62px 16px 24px;background:rgba(3,8,15,.76);backdrop-filter:blur(8px)}
 .modal-backdrop.open,.settings-modal.open{display:flex}
+.account-list-status{min-height:1rem;color:var(--muted);font-size:.72rem;line-height:1.45}
+.account-list-status:empty{display:none}
+.action-button.danger{border-color:rgba(248,113,113,.38);color:#fca5a5}
+.action-button.danger:hover:not(:disabled){border-color:rgba(248,113,113,.7);background:rgba(127,29,29,.18)}
 .settings-panel,.login-panel{width:min(570px,100%);max-height:min(88vh,900px);overflow:auto;border:1px solid var(--border-strong);border-radius:var(--radius-lg);background:var(--panel-solid);box-shadow:0 28px 80px rgba(0,0,0,.55);scrollbar-width:thin;scrollbar-color:rgba(148,163,184,.24) transparent}
 .settings-panel-head,.login-panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:15px 17px;border-bottom:1px solid var(--border);background:rgba(21,33,53,.5);font-size:.85rem;font-weight:650}
 .settings-panel-body,.login-panel-body{display:grid;gap:12px;padding:15px}

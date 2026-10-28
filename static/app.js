@@ -15,13 +15,18 @@ function installSportsDialogA11y(){
   if(window.__sportsDialogA11y)return;
   window.__sportsDialogA11y=true;
   window.__openSportsDialog=(dialog,opener)=>{
+    document.querySelectorAll('[role="dialog"].open').forEach(other=>{
+      if(other!==dialog)other.classList.remove("open");
+    });
     dialog.__returnFocus=opener||document.activeElement;
     dialog.classList.add("open");
-    const target=dialog.querySelector("[data-dialog-autofocus],button:not([disabled]),input:not([disabled]),select:not([disabled]),a[href]")||dialog;
+    dialog.setAttribute("aria-hidden","false");
+    const target=dialog.querySelector("[data-dialog-autofocus]")||dialog.querySelector("button:not([disabled]),input:not([disabled]),select:not([disabled]),a[href]")||dialog;
     requestAnimationFrame(()=>target.focus({preventScroll:true}));
   };
   window.__closeSportsDialog=dialog=>{
     dialog.classList.remove("open");
+    dialog.setAttribute("aria-hidden","true");
     const target=dialog.__returnFocus;
     if(target&&target.isConnected)target.focus({preventScroll:true});
   };
@@ -46,10 +51,12 @@ let crownLatestState={events:[],leagues:[],status:"检查中"};
 let crownRenderedSignature="";
 let crownRenderedAccountsSignature=null;
 let crownUpdateInFlight=false;
+let crownAccountGeneration=0;
 let crownRefreshPaused=false;
 let crownLastAccountsFetchAt=0;
 const crownExtraAttempts=new Map();
 const crownExtraLoading=new Set();
+const crownAccountActionsInFlight=new Set();
 
 function crownPostEmbeddedState(){
   if(!crownEmbedded||window.parent===window)return;
@@ -274,8 +281,31 @@ function crownRenderAccounts(accounts){
     const session=account.has_session?"已保存会话":"未保存会话";
     const checked=account.last_checked?` · 最后检查 ${crownEsc(account.last_checked)}`:"";
     const otp=account.status==="awaiting_otp"?`<form class="otp-form" data-otp-account="${crownEsc(account.id)}"><input name="code" inputmode="numeric" autocomplete="one-time-code" placeholder="动态验证码" required><button class="action-button primary" type="submit">提交验证码</button></form>`:"";
-    return `<div class="account-row" data-account-id="${crownEsc(account.id)}"><div class="account-row-head"><div><div class="account-row-name">${crownEsc(account.username)}</div><div class="account-row-meta">${crownEsc(account.base_url)} · ${session}${checked}</div></div><div class="account-row-status">${crownEsc(crownAccountStatus(account))}</div></div>${otp}<div class="account-row-actions"><button class="action-button" data-account-action="login">登录</button><button class="action-button" data-account-action="check">检查会话</button><button class="action-button" data-account-action="relogin">重新登录</button><button class="action-button" data-account-action="cancel">取消</button><button class="action-button" data-account-action="clear">清除会话</button><button class="action-button" data-account-action="delete">删除</button></div></div>`;
+    return `<div class="account-row" data-account-id="${crownEsc(account.id)}"><div class="account-row-head"><div><div class="account-row-name">${crownEsc(account.username)}</div><div class="account-row-meta">${crownEsc(account.base_url)} · ${session}${checked}</div></div><div class="account-row-status">${crownEsc(crownAccountStatus(account))}</div></div>${otp}<div class="account-row-actions"><button class="action-button" data-account-action="login">登录</button><button class="action-button" data-account-action="check">检查会话</button><button class="action-button" data-account-action="relogin">重新登录</button><button class="action-button" data-account-action="cancel">取消</button><button class="action-button" data-account-action="clear">清除会话</button><button class="action-button danger" data-account-action="delete">删除</button></div></div>`;
   }).join("");
+}
+function crownApplyAccounts(accounts,forceRender=false){
+  const accountList=Array.isArray(accounts)?accounts:[];
+  const accountSignature=JSON.stringify(accountList);
+  if(forceRender||accountSignature!==crownRenderedAccountsSignature){
+    crownRenderedAccountsSignature=accountSignature;
+    crownRenderAccounts(accountList);
+  }
+  return accountList;
+}
+function crownSetAccountsStatus(message){
+  const status=crown$("crownAccountsStatus");
+  if(status)status.textContent=message||"";
+}
+async function crownRefreshAccounts(forceRender=false){
+  const generation=crownAccountGeneration;
+  const response=await fetch("/api/crown/accounts",{cache:"no-store"});
+  if(!response.ok)throw new Error("账号列表刷新失败");
+  const payload=await response.json();
+  if(generation!==crownAccountGeneration)return false;
+  crownLastAccountsFetchAt=Date.now();
+  crownApplyAccounts(payload.accounts,forceRender);
+  return true;
 }
 async function crownUpdate(forceAccounts=false){
   if(crownUpdateInFlight)return;
@@ -284,6 +314,7 @@ async function crownUpdate(forceAccounts=false){
     const loginDialogOpen=crown$("loginModal").classList.contains("open");
     const accountPollInterval=loginDialogOpen?4000:15000;
     const includeAccounts=forceAccounts||Date.now()-crownLastAccountsFetchAt>=accountPollInterval;
+    const accountGeneration=crownAccountGeneration;
     const accountPromise=includeAccounts?fetch("/api/crown/accounts",{cache:"no-store"}).catch(()=>null):null;
     const eventResponse=await fetch("/api/crown/events?compact=1",{cache:"no-store"});
     if(!eventResponse.ok)throw new Error("HTTP error");
@@ -292,11 +323,9 @@ async function crownUpdate(forceAccounts=false){
     if(accountPromise){
       const accountResponse=await accountPromise;
       crownLastAccountsFetchAt=Date.now();
-      if(accountResponse&&accountResponse.ok){
+      if(accountResponse&&accountResponse.ok&&accountGeneration===crownAccountGeneration){
         const accounts=await accountResponse.json();
-        const accountList=Array.isArray(accounts.accounts)?accounts.accounts:[];
-        const accountSignature=JSON.stringify(accountList);
-        if(accountSignature!==crownRenderedAccountsSignature){crownRenderedAccountsSignature=accountSignature;crownRenderAccounts(accountList);}
+        if(accountGeneration===crownAccountGeneration)crownApplyAccounts(accounts.accounts);
       }
     }
   }catch(error){
@@ -311,22 +340,46 @@ async function crownUpdate(forceAccounts=false){
 }
 async function crownCheck(){
   const button=crown$("checkCrownSession");button.disabled=true;button.textContent="检查中…";
-  try{await fetch("/api/crown/session/check",{method:"POST",headers:{"Content-Type":"application/json"}});}finally{button.disabled=false;button.textContent="检查全部会话";await crownUpdate(true);}
+  try{await fetch("/api/crown/session/check",{method:"POST",headers:{"Content-Type":"application/json"}});}finally{button.disabled=false;button.textContent="检查全部会话";await Promise.allSettled([crownRefreshAccounts(true),crownUpdate()]);}
 }
 async function crownAccountAction(id,action){
-  const row=document.querySelector(`[data-account-id="${CSS.escape(id)}"]`);
+  if(crownAccountActionsInFlight.has(id))return;
+  crownAccountActionsInFlight.add(id);
+  const root=crown$("crownAccounts");
+  const row=[...root.querySelectorAll("[data-account-id]")].find(item=>item.dataset.accountId===id);
   const button=row&&row.querySelector(`[data-account-action="${action}"]`);
-  if(button){button.disabled=true;button.textContent="处理中…";}
+  const rowButtons=row?[...row.querySelectorAll("button")]:[];
+  if(row)row.setAttribute("aria-busy","true");
+  rowButtons.forEach(item=>{item.disabled=true;});
+  if(button)button.textContent="处理中…";
+  crownSetAccountsStatus("");
   try{
-    const response=await fetch(`/api/crown/accounts/${encodeURIComponent(id)}/${action}`,{method:"POST",headers:{"Content-Type":"application/json"}});
-    const payload=await response.json();
+    const response=await fetch(`/api/crown/accounts/${encodeURIComponent(id)}/${action}`,{
+      method:action==="delete"?"DELETE":"POST",
+      headers:{"Content-Type":"application/json"},
+    });
+    const payload=await response.json().catch(()=>({}));
     if(!response.ok)throw new Error(payload.error||"操作失败");
-  }catch(error){window.alert(error.message||"操作失败");}
-  await crownUpdate(true);
+    crownAccountGeneration+=1;
+    if(Array.isArray(payload.accounts))crownApplyAccounts(payload.accounts,true);
+    else await crownRefreshAccounts(true);
+    const messages={clear:"已清除保存的会话，账号和密码仍保留。",delete:"账号及本地保存的凭据已永久删除。",cancel:"已取消当前登录任务。",check:"会话检查已完成。",login:"登录任务已启动。",relogin:"已清除旧会话并重新启动登录。"};
+    crownSetAccountsStatus(messages[action]||"账号操作已完成。");
+  }catch(error){
+    crownSetAccountsStatus(error.message||"操作失败");
+    window.alert(error.message||"操作失败");
+  }finally{
+    crownAccountActionsInFlight.delete(id);
+    if(row?.isConnected){
+      row.removeAttribute("aria-busy");
+      rowButtons.forEach(item=>{item.disabled=false;});
+      if(button)button.textContent={login:"登录",check:"检查会话",relogin:"重新登录",cancel:"取消",clear:"清除会话",delete:"删除"}[action]||"操作";
+    }
+  }
 }
 function settingsOpen(){window.__openSportsDialog(crown$("settingsModal"),crown$("settingsButton"));}
 function settingsClose(){window.__closeSportsDialog(crown$("settingsModal"));}
-function loginOpen(){window.__openSportsDialog(crown$("loginModal"),crown$("joinSessionButton"));crownUpdate(true);}
+function loginOpen(){window.__openSportsDialog(crown$("loginModal"),crown$("joinSessionButton"));crownRefreshAccounts().catch(()=>{});}
 crown$("crownAccountForm").addEventListener("submit",async event=>{
   event.preventDefault();
   const status=crown$("crownAccountFormStatus");
@@ -338,7 +391,8 @@ crown$("crownAccountForm").addEventListener("submit",async event=>{
     const result=await response.json();
     if(!response.ok)throw new Error(result.error||"添加账号失败");
     crown$("crownPassword").value="";crown$("crownTotp").value="";status.textContent="账号已保存，登录任务已启动。";
-    await crownUpdate(true);
+    crownAccountGeneration+=1;
+    await Promise.allSettled([crownRefreshAccounts(true),crownUpdate()]);
   }catch(error){status.textContent=error.message||"添加账号失败";}
   finally{button.disabled=false;}
 });
@@ -348,7 +402,6 @@ crown$("settingsModal").addEventListener("click",event=>{if(event.target===crown
 crown$("crownLoginButton").addEventListener("click",()=>{settingsClose();loginOpen();});
 crown$("joinSessionButton").addEventListener("click",loginOpen);
 crown$("closeLogin").addEventListener("click",()=>window.__closeSportsDialog(crown$("loginModal")));
-crown$("loginModal").addEventListener("click",event=>{if(event.target===crown$("loginModal"))window.__closeSportsDialog(crown$("loginModal"));});
 crown$("crownEvents").addEventListener("click",event=>{
   const loginButton=event.target.closest("[data-open-login]");if(loginButton){loginOpen();return;}
   const groupButton=event.target.closest("[data-group-toggle]");if(groupButton){const key=groupButton.dataset.groupToggle;if(crownCollapsedGroups.has(key))crownCollapsedGroups.delete(key);else crownCollapsedGroups.add(key);crownRender(crownLatestState);return;}
@@ -356,11 +409,11 @@ crown$("crownEvents").addEventListener("click",event=>{
 });
 crown$("crownEventDetail").addEventListener("click",event=>{if(event.target.closest("[data-open-login]"))loginOpen();});
 crown$("checkCrownSession").addEventListener("click",crownCheck);
-crown$("crownAccounts").addEventListener("click",event=>{const button=event.target.closest("[data-account-action]");if(!button)return;const row=button.closest("[data-account-id]");if(!row)return;const action=button.dataset.accountAction;if(action==="delete"&&!window.confirm("确认删除这个账号及其本地会话吗？"))return;crownAccountAction(row.dataset.accountId,action);});
+crown$("crownAccounts").addEventListener("click",event=>{const button=event.target.closest("[data-account-action]");if(!button)return;const row=button.closest("[data-account-id]");if(!row)return;const action=button.dataset.accountAction;const username=row.querySelector(".account-row-name")?.textContent||"该账号";if(action==="delete"&&!window.confirm(`确认永久删除“${username}”？这会删除本地保存的账号、密码和会话，且无法撤销。`))return;crownAccountAction(row.dataset.accountId,action);});
 crown$("crownAccounts").addEventListener("submit",async event=>{
   const form=event.target.closest("[data-otp-account]");if(!form)return;event.preventDefault();
   const button=form.querySelector("button[type=submit]");button.disabled=true;
-  try{const response=await fetch(`/api/crown/accounts/${encodeURIComponent(form.dataset.otpAccount)}/otp`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({code:new FormData(form).get("code")})});const result=await response.json();if(!response.ok)throw new Error(result.error||"验证码提交失败");await crownUpdate(true);}catch(error){window.alert(error.message||"验证码提交失败");button.disabled=false;}
+  try{const response=await fetch(`/api/crown/accounts/${encodeURIComponent(form.dataset.otpAccount)}/otp`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({code:new FormData(form).get("code")})});const result=await response.json();if(!response.ok)throw new Error(result.error||"验证码提交失败");crownAccountGeneration+=1;await crownRefreshAccounts(true);}catch(error){window.alert(error.message||"验证码提交失败");button.disabled=false;}
 });
 crown$("crownSearch").addEventListener("input",()=>crownRender(crownLatestState));
 crown$("crownFilter").addEventListener("change",()=>crownRender(crownLatestState));
