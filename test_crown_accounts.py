@@ -216,6 +216,59 @@ class CrownAccountTests(unittest.TestCase):
         self.assertIs(context, browser.contexts[0])
         self.assertFalse(owns_context)
 
+    def test_manual_login_page_identity_uses_only_non_secret_bootstrap_fields(self):
+        class FakeFrame:
+            url = "https://m829.crw066.com/"
+
+            def evaluate(self, _script):
+                return {
+                    "uid": "member-uid",
+                    "ver": "4.1.2",
+                    "langx": "zh-cn",
+                    "ltype": "1",
+                    "odd_f_type": "H",
+                    "mid": "12345678",
+                    "passwd": "must-not-be-read",
+                    "passwd_safe": "must-not-be-read",
+                }
+
+        service = AuthService.__new__(AuthService)
+        job = SimpleNamespace(
+            uid="", member_authenticated=False, member_origin="https://m829.crw066.com",
+            member_protocol={}, member_resume_query={}, resume_url="",
+            account={"kind": "crown_odds", "base_url": "https://hga038.com", "username": "member"},
+        )
+
+        adopted = service._adopt_member_page_identity(job, FakeFrame())
+
+        self.assertTrue(adopted)
+        self.assertEqual(job.uid, "member-uid")
+        self.assertEqual(job.member_protocol, {
+            "origin": "https://m829.crw066.com", "ver": "4.1.2", "langx": "zh-cn",
+        })
+        self.assertEqual(job.member_resume_query["odd_f_type"], "H")
+        self.assertEqual(job.member_resume_query["ltype"], "1")
+        self.assertNotIn("passwd", job.member_resume_query)
+        self.assertNotIn("passwd_safe", job.member_resume_query)
+
+    def test_manual_login_page_identity_rejects_uid_conflict(self):
+        class FakeFrame:
+            url = "https://m829.crw066.com/"
+
+            def evaluate(self, _script):
+                return {"uid": "new-uid", "ver": "4.1.2", "langx": "zh-cn", "ltype": "1"}
+
+        service = AuthService.__new__(AuthService)
+        job = SimpleNamespace(
+            uid="existing-uid", member_authenticated=True,
+            member_origin="https://m829.crw066.com", member_protocol={},
+            member_resume_query={}, resume_url="",
+            account={"kind": "crown_odds", "base_url": "https://hga038.com", "username": "member"},
+        )
+
+        self.assertFalse(service._adopt_member_page_identity(job, FakeFrame()))
+        self.assertEqual(job.uid, "existing-uid")
+
     def test_saved_storage_state_excludes_pinnacle(self):
         class FakePage:
             url = "https://hga038.com/login"

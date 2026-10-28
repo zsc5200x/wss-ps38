@@ -89,6 +89,23 @@ _MEMBER_RESUME_KEYS = frozenset({
     "currency", "odd_f", "domain", "blackBoxStatus", "odd_f_type", "timetype",
     "sw_2fa", "editdate", "four_pwd", "abox4pwd_notshow", "msg", "langx", "iovationCnt",
 })
+_MEMBER_PAGE_IDENTITY_KEYS = (
+    "uid", "ver", "langx", "ltype", "odd_f_type",
+)
+_MEMBER_PAGE_IDENTITY_SCRIPT = """
+() => {
+  const data = window._CHDomain;
+  if (!data || typeof data !== "object") return null;
+  const result = {};
+  for (const key of %s) {
+    const value = data[key];
+    if (typeof value === "string" || typeof value === "number") {
+      result[key] = String(value);
+    }
+  }
+  return result;
+}
+""" % json.dumps(list(_MEMBER_PAGE_IDENTITY_KEYS))
 _MEMBER_QUERY_MAX_LENGTH = 16384
 _SESSION_BASELINE_UNSET = object()
 
@@ -1001,6 +1018,12 @@ class AuthService:
                           last_checked=_now())
                 job.status = "awaiting_manual"
                 return
+            # A manual login can complete without exposing a readable login
+            # response to Playwright. Adopt only the site's non-secret identity
+            # bootstrap when the signed-in member UI is visibly present.
+            if (not job.member_authenticated and self._member_signed_in(frame)
+                    and self._adopt_member_page_identity(job, frame)):
+                job.member_ui_verified = True
             logout = self._visible_locator(frame, [
                 'a:has-text("退出登录")', 'button:has-text("退出登录")',
                 'a:has-text("登出")', 'button:has-text("登出")',
@@ -1055,6 +1078,70 @@ class AuthService:
             return bool(re.search(r"(?:RMB|CNY|USD|HKD|余额|餘額)\s*[:：]?\s*[\d,]+(?:\.\d+)?", text))
         except Exception:
             return False  # A redirect may replace the header during detection.
+
+    @staticmethod
+    def _member_page_identity_values(frame):
+        """Read only non-secret identity/protocol fields from a signed-in Crown page."""
+        try:
+            values = frame.evaluate(_MEMBER_PAGE_IDENTITY_SCRIPT)
+        except Exception:
+            return {}
+        if not isinstance(values, dict):
+            return {}
+        result = {}
+        for key in _MEMBER_PAGE_IDENTITY_KEYS:
+            value = values.get(key)
+            if isinstance(value, str):
+                result[key] = value
+        uid = result.get("uid", "")
+        if (not uid or len(uid) > 4096
+                or any(ord(char) < 32 for char in uid)):
+            return {}
+        return result
+
+    def _adopt_member_page_identity(self, job, frame):
+        """Recover a manually completed login when its response was not observable.
+
+        The normal login response remains the preferred evidence. Some Crown
+        handoffs clear or replace the response before Playwright can read it,
+        while the signed-in page still exposes the same non-secret bootstrap
+        fields used by the member site. Read only those fields, never password
+        or safe-password values.
+        """
+        values = self._member_page_identity_values(frame)
+        uid = values.get("uid", "")
+        if not uid or (job.uid and job.uid != uid):
+            return False
+        query = {
+            key: value for key, value in values.items()
+            if key in _MEMBER_RESUME_KEYS
+        }
+        query["uid"] = uid
+        query = self._member_query(job, query, uid=uid)
+        ver = self._protocol_value(values.get("ver"), r"[A-Za-z0-9._-]+", 96)
+        langx = self._protocol_value(
+            values.get("langx"), r"[A-Za-z]{2,3}(?:[-_][A-Za-z]{2,4})?", 16,
+        )
+        if not query or not ver or not langx:
+            return False
+        try:
+            parts = urlsplit(frame.url)
+            if parts.scheme not in {"http", "https"} or not parts.hostname:
+                return False
+            hostname = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
+            default_port = 443 if parts.scheme == "https" else 80
+            origin = f"{parts.scheme}://{hostname}" + (
+                f":{parts.port}" if parts.port and parts.port != default_port else ""
+            )
+        except (TypeError, ValueError):
+            return False
+        job.uid = uid
+        job.member_authenticated = True
+        job.member_origin = job.member_origin or origin
+        job.member_protocol = {"origin": origin, "ver": ver, "langx": langx}
+        job.member_resume_query = query
+        job.resume_url = parts._replace(query="", fragment="").geturl()
+        return True
 
     def _tick(self):
         for account_id, job in list(self._jobs.items()):
