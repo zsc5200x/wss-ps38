@@ -17,7 +17,8 @@
 - `crown.sh`：幂等启动皇冠运行时的辅助脚本。
 - `dashboard.sh`：启动统一看板，同时确保皇冠服务可用，不要求 Chrome CDP 在线。
 - `crown/`：皇冠登录、Playwright 会话、赛事采集和独立页面运行时。
-- `dashboard/static/`：看板前端页面、样式和交互脚本。
+- `crown/static/`：拆分后的皇冠页面、样式和前端交互脚本。
+- `dashboard/static/`：统一看板前端页面、样式和交互脚本。
 - `odds_history.sqlite3`：看板自动创建的 SQLite 历史赔率数据库。
 - `backfill_history.py`：把已有或轮转后的 `capture-*.jsonl` 历史采集数据回填到 SQLite。
 - `metadata_sync.py`：通过已登录平博页面接口补齐缺失赛事名称、联赛、开赛时间和事件 ID 关联。

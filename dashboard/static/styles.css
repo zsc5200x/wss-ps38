@@ -361,20 +361,19 @@ h2 {
   min-width: 0;
 }
 
-body.crown-mode .topbar-telemetry,
 body.crown-mode .footer-bar {
   display: none;
 }
 
 .crown-page {
-  min-height: calc(100vh - 126px);
+  min-height: calc(100vh - 174px);
 }
 
 .crown-frame {
   display: block;
   width: 100%;
-  height: calc(100vh - 126px);
-  min-height: 720px;
+  height: calc(100vh - 174px);
+  min-height: 650px;
   border: 0;
   border-radius: 14px;
   background: #080d16;

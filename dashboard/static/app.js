@@ -9,6 +9,7 @@
     connectionPill: $("connectionPill"),
     connectionText: $("connectionText"),
     lastCapture: $("lastCapture"),
+    telemetrySource: $("telemetrySource"),
     primaryNav: $("primaryNav"),
     pagePanels: [...document.querySelectorAll("[data-page-panel]")],
     pauseButton: $("pauseButton"),
@@ -96,6 +97,11 @@
     market: "all",
     paused: false,
     crownPaused: false,
+    crownStatus: "检查中",
+    crownError: null,
+    crownCached: false,
+    crownUpdatedAt: null,
+    crownEventCount: 0,
     refreshing: false,
     failures: 0,
     snapshot: null,
@@ -699,7 +705,12 @@
     for (const panel of dom.pagePanels) {
       panel.classList.toggle("hidden", panel.dataset.pagePanel !== target);
     }
-    if (target === "crown") ensureCrownFrameLoaded();
+    if (target === "crown") {
+      ensureCrownFrameLoaded();
+      renderCrownTelemetry();
+    } else {
+      setStatus(state.snapshot?.freshness || "no-data", state.paused);
+    }
     updateRefreshControls();
     document.title = target === "home"
       ? "数据工作台"
@@ -711,7 +722,37 @@
     window.scrollTo(0, 0);
   }
 
+  function crownTelemetryKind() {
+    if (state.crownStatus === "已连接" && !state.crownError) return "live";
+    if (state.crownError || /需要重新登录|过期|冲突|未连接|失败/.test(state.crownStatus)) return "offline";
+    if (state.crownCached || /数据延迟|缓存数据/.test(state.crownStatus)) return "delayed";
+    return "loading";
+  }
+
+  function renderCrownTelemetry() {
+    if (state.currentPage !== "crown") return;
+    const kind = crownTelemetryKind();
+    const labels = {
+      live: "皇冠实时接收中",
+      delayed: state.crownCached ? "皇冠缓存数据" : "皇冠数据延迟",
+      offline: state.crownError === "session_conflict"
+        ? "皇冠重复登录"
+        : (state.crownError === "session_expired" ? "皇冠会话已过期" : "皇冠连接异常"),
+      loading: "连接皇冠中",
+    };
+    dom.connectionPill.className = `status-pill ${kind === "loading" ? "loading" : kind}`;
+    dom.connectionText.textContent = labels[kind];
+    dom.telemetrySource.textContent = `Crown Odds / ${state.crownEventCount} 场赛事`;
+    dom.lastCapture.textContent = state.crownUpdatedAt
+      ? formatClock(state.crownUpdatedAt)
+      : "--:--:--";
+  }
+
   function setStatus(freshness, paused = false) {
+    if (state.currentPage === "crown") {
+      renderCrownTelemetry();
+      return;
+    }
     dom.connectionPill.className = "status-pill";
     dom.latencyBadge.className = "micro-badge";
     if (paused) {
@@ -768,6 +809,7 @@
     dom.metricPartial.textContent = `部分 ${numberFormatter.format(stats.partial || 0)}`;
     dom.metricMessages.textContent = `消息 ${numberFormatter.format(stats.messages || 0)}`;
     dom.lastCapture.textContent = formatClock(snapshot.source?.lastCapturedAt);
+    dom.telemetrySource.textContent = "PS3838 / Pinnacle Feed";
     dom.sourceText.textContent = snapshot.source?.capturePath || "capture.jsonl";
     setStatus(snapshot.freshness, state.paused);
   }
@@ -1802,7 +1844,15 @@
     const data = event.data || {};
     if (data.type !== "crown:state") return;
     state.crownPaused = Boolean(data.paused);
-    if (state.currentPage === "crown") updateRefreshControls();
+    state.crownStatus = String(data.status || "检查中");
+    state.crownError = data.error || null;
+    state.crownCached = Boolean(data.cached);
+    state.crownUpdatedAt = data.updatedAt || null;
+    state.crownEventCount = Number(data.eventCount || 0);
+    if (state.currentPage === "crown") {
+      updateRefreshControls();
+      renderCrownTelemetry();
+    }
   });
 
   dom.crownFrame?.addEventListener("load", () => {

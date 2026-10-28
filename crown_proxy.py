@@ -28,8 +28,12 @@ FORWARD_RESPONSE_HEADERS = (
 
 def is_crown_path(path: str) -> bool:
     """Return whether *path* belongs to the Crown page or its API."""
-    return path in {"/crown", "/crown/"} or path == "/api/crown" or path.startswith(
-        "/api/crown/"
+    return (
+        path in {
+            "/crown", "/crown/", "/crown/static/app.css", "/crown/static/app.js",
+            "/api/crown",
+        }
+        or path.startswith("/api/crown/")
     )
 
 

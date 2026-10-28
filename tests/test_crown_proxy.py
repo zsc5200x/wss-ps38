@@ -43,10 +43,16 @@ class FakeHandler:
 
 class CrownProxyTests(unittest.TestCase):
     def test_accepts_only_crown_page_and_api_paths(self):
-        for path in ("/crown", "/crown/", "/api/crown", "/api/crown/events"):
+        for path in (
+            "/crown", "/crown/", "/crown/static/app.css", "/crown/static/app.js",
+            "/api/crown", "/api/crown/events",
+        ):
             with self.subTest(path=path):
                 self.assertTrue(crown_proxy.is_crown_path(path))
-        for path in ("/", "/api/snapshot", "/api/crownish/events"):
+        for path in (
+            "/", "/api/snapshot", "/api/crownish/events",
+            "/crown/static/secret.txt", "/crown/static/../app.py",
+        ):
             with self.subTest(path=path):
                 self.assertFalse(crown_proxy.is_crown_path(path))
 
