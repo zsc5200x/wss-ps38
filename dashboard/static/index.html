@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0a0f19">
+  <title>赔率数据终端</title>
+  <link rel="stylesheet" href="/static/styles.css?v=20261028-2005">
+</head>
+<body>
+  <div class="ambient ambient-a" aria-hidden="true"></div>
+  <div class="ambient ambient-b" aria-hidden="true"></div>
+
+  <div class="app-shell">
+    <header class="topbar">
+      <nav id="primaryNav" class="primary-nav" aria-label="主要页面">
+        <button class="page-nav-button active" type="button" data-page="home" aria-current="page">主页</button>
+        <button class="page-nav-button" type="button" data-page="pinnacle">平博数据</button>
+        <button class="page-nav-button" type="button" data-page="crown">皇冠数据</button>
+      </nav>
+
+      <div class="topbar-actions">
+        <button id="pauseButton" class="button ghost" type="button" aria-pressed="false" aria-label="暂停自动刷新">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M8 5v14M16 5v14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+          <span>暂停刷新</span>
+        </button>
+        <button id="refreshButton" class="button primary" type="button" aria-label="立即刷新">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M20 7v5h-5M4 17v-5h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M18.2 9A7 7 0 0 0 6.1 6.8L4 9m16 6-2.1 2.2A7 7 0 0 1 5.8 15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span>立即刷新</span>
+        </button>
+      </div>
+    </header>
+
+    <section class="topbar-telemetry" aria-label="数据接收状态">
+      <div class="telemetry-status">
+        <div id="connectionPill" class="status-pill loading" aria-live="polite">
+          <span class="status-dot"></span>
+          <span id="connectionText">正在连接</span>
+        </div>
+      </div>
+      <div class="telemetry-source">
+        <span class="label">当前数据源</span>
+        <strong>PS3838 / Pinnacle Feed</strong>
+      </div>
+      <div class="last-capture">
+        <span class="label">最后数据</span>
+        <strong id="lastCapture">--:--:--</strong>
+      </div>
+    </section>
+
+    <div id="pinnaclePage" class="page-view hidden" data-page-panel="pinnacle" aria-label="平博实时数据看板">
+    <section class="metrics-grid" aria-label="实时指标">
+      <article class="metric-card">
+        <div class="metric-head">
+          <span>滚球 + 今日待开赛</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 5h14v14H5zM5 10h14M10 5v14" fill="none" stroke="currentColor" stroke-width="1.5"/>
+          </svg>
+        </div>
+        <strong id="metricEvents">--</strong>
+        <div class="metric-foot"><span id="metricLive">滚球 --</span><span id="metricToday">今日待开 --</span></div>
+      </article>
+
+      <article class="metric-card">
+        <div class="metric-head">
+          <span>有效报价</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 18 9 12l4 3 7-9" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <strong id="metricQuotes">--</strong>
+        <div class="metric-foot"><span id="metricRows">总行数 --</span><span id="metricChanges">变化 0</span></div>
+      </article>
+
+      <article class="metric-card metric-latency">
+        <div class="metric-head">
+          <span>数据延迟</span>
+          <span id="latencyBadge" class="micro-badge">等待</span>
+        </div>
+        <strong id="metricLatency">--</strong>
+        <div class="metric-foot"><span id="metricServerTime">服务器 --</span></div>
+      </article>
+
+      <article class="metric-card">
+        <div class="metric-head">
+          <span>元数据完整率</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.5"/>
+            <path d="m8.5 12 2.2 2.2 4.8-5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <strong id="metricQuality">--</strong>
+        <div class="metric-foot"><span id="metricPartial">部分 --</span><span id="metricMessages">消息 --</span></div>
+      </article>
+    </section>
+
+    <main class="workspace">
+      <aside class="events-panel panel">
+        <div class="panel-title-row">
+          <div>
+            <div class="eyebrow">LEAGUE RADAR</div>
+            <h2>联赛雷达</h2>
+          </div>
+          <span id="eventCount" class="count-badge">0</span>
+        </div>
+
+        <label class="search-field" for="eventSearch">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"/>
+            <path d="m16 16 4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+          <span class="sr-only">搜索联赛、比赛或 ID</span>
+          <input id="eventSearch" type="search" placeholder="搜索联赛、比赛或 ID" autocomplete="off" spellcheck="false">
+        </label>
+
+        <div class="event-controls">
+          <div id="metadataFilters" class="filter-group" role="group" aria-label="按元数据状态筛选">
+            <button class="filter-chip active" type="button" data-filter="all">全部</button>
+            <button class="filter-chip" type="button" data-filter="complete">完整</button>
+            <button class="filter-chip" type="button" data-filter="partial">部分</button>
+            <button class="filter-chip" type="button" data-filter="missing">缺失</button>
+          </div>
+          <label class="compact-select">
+            <span class="sr-only">赛事排序</span>
+            <select id="sortSelect">
+              <option value="stable" selected>稳定排序</option>
+              <option value="kickoff">开赛时间</option>
+              <option value="name">比赛名称</option>
+            </select>
+          </label>
+        </div>
+
+        <section id="metadataMaintenance" class="metadata-maintenance" aria-label="赛事元数据维护">
+          <div class="metadata-maintenance-head">
+            <div class="metadata-maintenance-copy">
+              <span class="maintenance-label">METADATA HEALTH</span>
+              <strong id="metadataSyncSummary">读取元数据状态...</strong>
+            </div>
+            <div class="metadata-maintenance-actions">
+              <button id="metadataCheckButton" class="button mini ghost" type="button">检查缺失</button>
+              <button id="metadataRepairButton" class="button mini primary" type="button">一键补全</button>
+            </div>
+          </div>
+          <div id="metadataProgress" class="metadata-progress" hidden>
+            <div class="metadata-progress-track" aria-hidden="true">
+              <span id="metadataProgressBar"></span>
+            </div>
+          </div>
+          <p id="metadataSyncDetail" class="metadata-sync-detail" aria-live="polite">等待状态...</p>
+        </section>
+
+        <div id="eventList" class="event-list" aria-live="polite"></div>
+      </aside>
+
+      <section class="content-column">
+        <article class="selected-panel panel">
+          <div class="selected-copy">
+            <div class="eyebrow">SELECTED EVENT</div>
+            <h2 id="selectedName">请选择一场赛事</h2>
+            <div class="selected-meta">
+              <span id="selectedLeague" class="meta-pill">联赛 --</span>
+              <span id="selectedScore" class="meta-pill score-pill" hidden>比分 --</span>
+              <span id="selectedClock" class="meta-pill clock-pill" hidden>比赛 --</span>
+              <span id="selectedKickoff" class="meta-pill">开赛 --</span>
+              <span id="selectedQuality" class="meta-pill">状态 --</span>
+            </div>
+          </div>
+          <div class="selected-stats">
+            <div><span>有效 / 总盘口</span><strong id="selectedQuotes">--</strong></div>
+            <div><span>数据更新</span><strong id="selectedChanged">--</strong></div>
+          </div>
+        </article>
+
+        <section id="historyPanel" class="history-panel panel">
+          <div class="section-heading history-heading">
+            <div class="section-toggle-copy">
+              <div class="eyebrow">PERSISTED HISTORY</div>
+              <button id="historyToggle" class="section-toggle" type="button" aria-expanded="true" aria-controls="historyContent">
+                <span class="section-toggle-title">香港赔率走势</span>
+                <span class="section-toggle-chevron" aria-hidden="true">
+                  <svg viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </span>
+              </button>
+            </div>
+            <div class="history-controls">
+              <label class="compact-select history-row-select">
+                <span class="sr-only">选择盘口</span>
+                <select id="historyRowSelect" aria-label="选择要查询的盘口"></select>
+              </label>
+              <label class="compact-select">
+                <span class="sr-only">历史时间范围</span>
+                <select id="historyRangeSelect" aria-label="历史时间范围">
+                  <option value="1">近 1 小时</option>
+                  <option value="6">近 6 小时</option>
+                  <option value="24" selected>近 24 小时</option>
+                  <option value="168">近 7 天</option>
+                  <option value="720">近 30 天</option>
+                </select>
+              </label>
+              <button id="historyRefreshButton" class="icon-button" type="button" aria-label="刷新历史赔率" title="刷新历史赔率">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M20 7v5h-5M4 17v-5h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="M18.2 9A7 7 0 0 0 6.1 6.8L4 9m16 6-2.1 2.2A7 7 0 0 1 5.8 15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          <div id="historyContent" class="section-collapse-content">
+            <div class="history-status-row">
+              <span id="historyStatus" class="database-badge">SQLite · 等待查询</span>
+              <span id="historyRecordedAt" class="history-recorded">仅记录实际香港赔率变化</span>
+            </div>
+
+            <div class="history-summary" aria-label="香港赔率历史摘要">
+              <div><span>首个香港赔率</span><strong id="historyFirst">—</strong></div>
+              <div><span>最新香港赔率</span><strong id="historyLast">—</strong></div>
+              <div><span>最高香港赔率</span><strong id="historyHigh">—</strong></div>
+              <div><span>最低香港赔率</span><strong id="historyLow">—</strong></div>
+              <div><span>区间变化</span><strong id="historyMove">—</strong></div>
+            </div>
+
+            <div class="history-chart-shell">
+              <svg id="historyChart" class="history-chart" viewBox="0 0 920 250" preserveAspectRatio="none" role="img" aria-label="香港赔率历史走势图">
+                <g id="historyGrid"></g>
+                <path id="historyArea" class="history-area" d=""></path>
+                <path id="historyLine" class="history-line" d=""></path>
+                <g id="historyDots"></g>
+              </svg>
+              <div id="historyEmpty" class="history-empty">
+                <strong>等待历史数据</strong>
+                <p>新的香港赔率变化会自动写入 SQLite，随后显示在这里。</p>
+              </div>
+            </div>
+            <div id="historyError" class="history-error hidden" role="status"></div>
+          </div>
+        </section>
+
+        <section id="changesPanel" class="changes-panel panel">
+          <div class="section-heading changes-heading">
+            <div class="section-toggle-copy">
+              <div class="eyebrow">LIVE MOVEMENT</div>
+              <button id="changesToggle" class="section-toggle" type="button" aria-expanded="true" aria-controls="changesContent">
+                <span class="section-toggle-title">香港赔率变化流</span>
+                <span class="section-toggle-chevron" aria-hidden="true">
+                  <svg viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </span>
+              </button>
+            </div>
+            <span id="changeCount" class="count-badge">0</span>
+          </div>
+          <div id="changesContent" class="section-collapse-content">
+            <div id="changeFeed" class="change-feed" aria-live="polite"></div>
+          </div>
+        </section>
+
+        <section class="odds-panel panel">
+          <div class="section-heading odds-heading">
+            <div class="odds-title">
+              <div class="eyebrow">CURRENT MARKET</div>
+              <div class="odds-title-line">
+                <h2>当前盘口</h2>
+                <span class="market-live-badge"><span></span>全场 · 实时</span>
+              </div>
+              <p class="section-subtitle">香港赔率 · 全场实时盘口</p>
+            </div>
+            <div id="marketTabs" class="market-tabs" role="tablist" aria-label="盘口筛选">
+              <button class="market-tab active" type="button" role="tab" aria-selected="true" data-market="all">全部</button>
+              <button class="market-tab" type="button" role="tab" aria-selected="false" data-market="1">胜平负</button>
+              <button class="market-tab" type="button" role="tab" aria-selected="false" data-market="2">让球</button>
+              <button class="market-tab" type="button" role="tab" aria-selected="false" data-market="3">大小球</button>
+            </div>
+          </div>
+
+          <div id="marketOverview" class="market-overview" aria-label="盘口数据摘要">
+            <div class="market-overview-item">
+              <span>盘口组</span>
+              <strong id="marketGroups">--</strong>
+            </div>
+            <div class="market-overview-item">
+              <span>有效 / 总报价</span>
+              <strong id="marketQuotes">--</strong>
+            </div>
+            <div class="market-overview-item">
+              <span>1 分钟内更新</span>
+              <strong id="marketFresh">--</strong>
+            </div>
+            <div class="market-overview-item">
+              <span>最新报价</span>
+              <strong id="marketLastUpdate">--</strong>
+            </div>
+          </div>
+
+          <div id="oddsEmpty" class="empty-state hidden">
+            <svg viewBox="0 0 64 64" aria-hidden="true">
+              <path d="M14 14h36v36H14z" fill="none" stroke="currentColor" stroke-width="2"/>
+              <path d="M22 24h20M22 32h20M22 40h12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+            <strong>还没有赔率数据</strong>
+            <p>保持采集器运行，新盘口到达后会自动显示在这里。</p>
+          </div>
+
+          <div id="oddsBoard" class="market-board" aria-live="polite"></div>
+        </section>
+      </section>
+    </main>
+    </div>
+
+    <section id="homePage" class="page-view integration-page panel hidden" data-page-panel="home" aria-labelledby="homePageTitle">
+      <div class="integration-page-head">
+        <div class="integration-title-group">
+          <span class="integration-mark home">H</span>
+          <div>
+            <div class="eyebrow">DATA WORKSPACE</div>
+            <h2 id="homePageTitle">数据工作台</h2>
+            <p>在一个工作台内切换平博与皇冠数据源，共用统一启动入口和顶部导航。</p>
+          </div>
+        </div>
+        <span class="integration-badge ready">数据源入口</span>
+      </div>
+
+      <div class="source-entry-grid">
+        <button class="source-entry" type="button" data-page-link="pinnacle">
+          <span class="source-entry-top">
+            <span class="source-entry-mark">P</span>
+            <span class="source-entry-state live"><span></span>实时数据</span>
+          </span>
+          <strong>平博数据</strong>
+          <p>PS3838 / Pinnacle 实时盘口、赔率变化与历史赔率。</p>
+          <span class="source-entry-action">进入平博看板 <span>→</span></span>
+        </button>
+
+        <button class="source-entry crown" type="button" data-page-link="crown">
+          <span class="source-entry-top">
+            <span class="source-entry-mark">C</span>
+            <span class="source-entry-state live"><span></span>已接入</span>
+          </span>
+          <strong>皇冠数据</strong>
+          <p>皇冠实时盘口、登录会话与赛事详情，直接在当前工作台内查看。</p>
+          <span class="source-entry-action">进入皇冠看板 <span>→</span></span>
+        </button>
+      </div>
+
+      <div class="home-workspace-note">
+        <span>统一入口</span>
+        <p>平博与皇冠保留各自独立的采集/登录运行时，在同一个看板和启动命令下协同工作。</p>
+      </div>
+    </section>
+
+    <section id="crownPage" class="page-view crown-page hidden" data-page-panel="crown" aria-label="皇冠实时数据看板">
+      <iframe
+        id="crownFrame"
+        class="crown-frame"
+        title="皇冠实时数据"
+        data-src="/crown?embed=1"
+        loading="lazy"
+      ></iframe>
+    </section>
+
+    <footer class="footer-bar">
+      <div class="source-path">
+        <span class="status-dot"></span>
+        <span id="sourceText">capture.jsonl</span>
+      </div>
+      <div id="footerMeta">轮询间隔 1.4 秒 · 仅本机访问</div>
+    </footer>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/static/app.js?v=20261028-2005" defer></script>
+</body>
+</html>

@@ -1,0 +1,21 @@
+{
+  "cdp_url": "http://127.0.0.1:9222",
+  "chrome_binary": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  "chrome_profile_dir": "~/.ps3838-wss-chrome-profile",
+  "start_url": "https://www.ps3838.com/zh-cn/sports/soccer",
+  "target_hosts": ["ps3838.com", "ps38ag.com"],
+  "capture_path": "capture.jsonl",
+  "events_file": "events_list.csv",
+  "live_snapshot_file": "latest_odds_live.csv",
+  "latest_output_file": "latest_odds_10_matches.csv",
+  "normalized_output_file": "latest_odds_normalized.csv",
+  "dashboard_db_path": "odds_history.sqlite3",
+  "backup_dir": "backups",
+  "backup_keep": 7,
+  "capture_compress_after_hours": 24,
+  "capture_compress_min_mb": 16,
+  "presence_interval_seconds": 5,
+  "targets": {},
+  "snapshot_interval_seconds": 2,
+  "capture_rotation_mb": 512
+}

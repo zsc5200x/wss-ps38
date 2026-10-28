@@ -1,0 +1,31 @@
+.venv/
+__pycache__/
+*.py[cod]
+config.json
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+backups/
+.run/
+logs/
+*.tmp
+capture.jsonl
+capture-*.jsonl
+capture-*.jsonl.gz
+capture-*.jsonl.zst
+latest_odds*.csv
+odds_preview.csv
+odds_normalized.csv
+_archive_cleanup_*/
+.DS_Store
+
+# Runtime-only data and generated previews
+screenshots/
+events_list.csv
+league-radar-desktop.png
+.playwright-mcp/
+*.bak.*
+
+# Crown has its own Git repository. Keep the parent repository from treating it
+# as an accidental embedded repository or sweeping its local session data in.
+crown/
