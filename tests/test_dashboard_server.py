@@ -488,7 +488,11 @@ class DashboardStoreTests(unittest.TestCase):
 
     def test_presence_removal_requires_two_consecutive_misses(self):
         store = self.make_store()
-        now = datetime.now().astimezone().replace(microsecond=0)
+        # Keep kickoff within the same local day even when the suite runs just
+        # before midnight; event presence is intentionally scoped to today.
+        now = datetime.now().astimezone().replace(
+            hour=12, minute=0, second=0, microsecond=0
+        )
         kickoff = (now + timedelta(hours=1)).isoformat()
         store.register_event("100", "Home", "Away", "Test League", kickoff)
         store.flush_history()

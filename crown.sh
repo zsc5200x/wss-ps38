@@ -60,12 +60,30 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   exit 1
 fi
 
+# Crown reuses the Chrome process that already owns the Pingbo tab. The
+# Playwright connection creates an isolated incognito context for Crown, so the
+# browser process is shared while cookies and saved sessions remain separated.
+CDP_URL="${CROWN_CDP_URL:-}"
+if [[ -z "$CDP_URL" && -f "$PROJECT_DIR/config.json" ]]; then
+  CDP_URL="$("$PYTHON_BIN" - "$PROJECT_DIR/config.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    print(json.load(handle).get("cdp_url", ""))
+PY
+  )"
+fi
+CDP_URL="${CDP_URL:-http://127.0.0.1:9222}"
+export CROWN_CDP_URL="$CDP_URL"
+
 if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   echo "端口 ${PORT} 已被其他进程占用，无法启动皇冠服务：" >&2
   lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >&2 || true
   exit 1
 fi
 
+echo "皇冠将复用平博 Chrome：$CROWN_CDP_URL"
 nohup "$PYTHON_BIN" -u "$CROWN_DIR/app.py" >>"$LOG_FILE" 2>&1 &
 PID=$!
 echo "$PID" >"$PID_FILE"

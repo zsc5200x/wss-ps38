@@ -92,6 +92,7 @@ fi
 export CAPTURE_CDP_URL="$CDP_URL"
 export CAPTURE_OUTPUT="$CAPTURE_PATH"
 export PS3838_CONFIG="$CONFIG_FILE"
+export CROWN_CDP_URL="$CDP_URL"
 
 cdp_is_ready() {
   curl -fsS --max-time 3 "$CDP_URL/json/version" >/dev/null 2>&1
