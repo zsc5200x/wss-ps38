@@ -26,7 +26,7 @@ try:
     from crown_local.backend.auth import AuthService
     from crown_local.backend.crown_member import CrownMemberMonitor
     from crown_local.backend.crown_odds import CrownOddsClient
-    from crown_local.backend.storage import Store
+    from crown_local.backend.storage import Store, normalize_login_url
 except ImportError as exc:  # pragma: no cover - shown as a safe UI error
     AuthService = None
     CrownMemberMonitor = None
@@ -225,7 +225,15 @@ def add_account(login_url, username, password, totp_secret=""):
     initialize()
     if store is None:
         raise RuntimeError("当前项目运行环境未就绪")
-    return store.save_account({
+    username = username.strip()
+    normalized_url, _login_path = normalize_login_url(login_url)
+    existing = next((
+        account for account in store.accounts()
+        if account.get("kind") == "crown_odds"
+        and account.get("base_url") == normalized_url
+        and account.get("username") == username
+    ), None)
+    payload = {
         "kind": "crown_odds",
         "base_url": login_url,
         "username": username,
@@ -235,7 +243,8 @@ def add_account(login_url, username, password, totp_secret=""):
         "role": "primary",
         "login_layer": "",
         "interval": 30,
-    })
+    }
+    return store.save_account(payload, account_id=existing["id"] if existing else None)
 
 
 def account_action(account_id, action):
