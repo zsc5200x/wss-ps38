@@ -4,8 +4,8 @@
 
 ## 功能范围
 
-- 皇冠账号管理：登录地址、账号、密码和可选的 TOTP 动态码。
-- 浏览器登录：通过 Playwright 打开皇冠会员站，完成登录和必要的二次验证。
+- 皇冠账号管理：只保存登录地址和账号，不接收密码、安全密码或 TOTP。
+- 手动浏览器登录：在平博同一个 Chrome 窗口中打开第二个普通标签页，由用户手动登录和完成二次验证。
 - 会话管理：保存、检查、重新登录、清除会话和删除账号。
 - 赛事轮询：登录成功后读取今日足球与滚球足球，默认每 6 秒轮询一次。
 - 失败退避：上游超时或暂时不可用时按 10、20、40、60 秒退避，页面保留最近一次成功数据。
@@ -20,7 +20,7 @@
 ```text
 app.py                         HTTP 服务、静态页面和 API 路由
 crown_runtime.py               皇冠账号运行时、赛事轮询、持久缓存和盘口标准化
-crown_local/backend/           皇冠登录、会员站、赔率、存储和 TOTP
+crown_local/backend/           皇冠会话监听、会员站、赔率和存储
 static/index.html              皇冠页面结构
 static/app.css                 皇冠页面样式
 static/app.js                  皇冠页面交互、轮询和嵌入状态同步
@@ -39,7 +39,7 @@ test_crown_odds_display.py     皇冠赔率和附加盘测试
 
 项目要求 Python 3.11 或更高版本。
 
-通过项目根目录的 `./start.sh` 或 `./crown.sh` 启动时，皇冠会连接平博正在使用的 Chrome CDP（默认 `http://127.0.0.1:9222`）。两种数据源共用一个 Chrome 进程，但皇冠使用独立的无痕浏览上下文，因此不会混用或导出平博 Cookie。手动触发的皇冠登录会主动置前，并在成功后保留可见标签页；清除会话、重新登录或停止服务时关闭。直接运行 `app.py` 且未设置 `CROWN_CDP_URL` 时，才会回退为皇冠独立浏览器。
+通过项目根目录的 `./start.sh` 或 `./crown.sh` 启动时，皇冠会连接平博正在使用的 Chrome CDP（默认 `http://127.0.0.1:9222`）。两者使用同一个 Chrome 默认配置和窗口，皇冠只新增第二个普通标签页，不创建无痕窗口。项目不会自动填写或提交登录表单；只会监听该皇冠标签页的站点请求，并把 Cookie 和站点存储严格限制在皇冠来源后再加密保存，不会把平博 Cookie 写入皇冠会话。直接运行 `app.py` 且未设置 `CROWN_CDP_URL` 时，才会回退为皇冠独立浏览器。
 
 ```bash
 cd /Users/zsc5200x/ps3838-wss/crown
@@ -66,8 +66,8 @@ CROWN_CDP_URL=http://127.0.0.1:9222 .venv/bin/python app.py
 ## 使用流程
 
 1. 打开 `/crown`，点击“连接皇冠会话”或进入设置。
-2. 填写皇冠登录地址、账号和密码；如账号启用了动态码，填写 TOTP 密钥。
-3. 保存后项目会启动登录任务。若站点要求人工完成验证码或二次验证，按页面提示在浏览器中完成。
+2. 填写皇冠登录地址和账号，点击“保存账号并打开皇冠标签页”。
+3. 在平博同一个 Chrome 窗口新增的皇冠普通标签页中手动输入账号、密码，并按页面要求完成验证码或二次验证。本项目和网页端都不会接收或保存这些密码类信息。
 4. 登录成功后，页面会自动读取滚球和今日赛事；也可点击“检查会话”确认当前会话。
 5. 点击赛事可查看主盘和附加盘。附加盘加载完成前会显示加载状态，失败时保留上一次成功的报价。
 
@@ -89,11 +89,10 @@ CROWN_CDP_URL=http://127.0.0.1:9222 .venv/bin/python app.py
 | GET | `/api/crown/events` | 完整皇冠赛事快照 |
 | GET | `/api/crown/events?compact=1` | 前端轻量赛事快照 |
 | GET | `/api/crown/accounts` | 皇冠账号列表 |
-| POST | `/api/crown/accounts` | 新增皇冠账号并启动登录 |
+| POST | `/api/crown/accounts` | 保存皇冠地址和账号，并打开普通登录标签页 |
 | GET | `/api/crown/session` | 当前会话和运行诊断（不含赛事） |
 | POST | `/api/crown/session/check` | 检查当前皇冠会话并刷新数据 |
 | POST | `/api/crown/events/<GID>/details` | 加载指定赛事的附加盘 |
-| POST | `/api/crown/accounts/<id>/otp` | 提交动态验证码 |
 | POST | `/api/crown/accounts/<id>/<action>` | 登录、检查、重新登录、取消、清除或删除 |
 | DELETE | `/api/crown/accounts/<id>` | 删除皇冠账号 |
 
@@ -101,7 +100,8 @@ CROWN_CDP_URL=http://127.0.0.1:9222 .venv/bin/python app.py
 
 ## 数据与安全
 
-- 账号密码、会话和 TOTP 密钥由 `crown_local/backend/storage.py` 管理，并以本地加密形式保存。
+- 浏览器会话由 `crown_local/backend/storage.py` 加密保存；密码、安全密码和 TOTP 不接收、不落盘。
+- 共享 Chrome 上下文的 Cookie 在保存前按皇冠来源过滤，平博 Cookie 不会进入皇冠会话记录。
 - 页面和 API 只监听 `127.0.0.1`，不要将端口直接暴露到公网。
 - 不要把 `data/`、Cookie、会话密钥或账号密码提交到 Git。
 - 本项目只执行只读赛事和赔率查询，不提供下注提交逻辑。

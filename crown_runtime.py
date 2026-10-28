@@ -221,7 +221,7 @@ def public_accounts():
     return [account for account in store.accounts() if account.get("kind") == "crown_odds"]
 
 
-def add_account(login_url, username, password, totp_secret=""):
+def add_account(login_url, username):
     initialize()
     if store is None:
         raise RuntimeError("当前项目运行环境未就绪")
@@ -237,8 +237,6 @@ def add_account(login_url, username, password, totp_secret=""):
         "kind": "crown_odds",
         "base_url": login_url,
         "username": username,
-        "password": password,
-        "totp_secret": totp_secret,
         "enabled": True,
         "role": "primary",
         "login_layer": "",
@@ -282,18 +280,6 @@ def account_action(account_id, action):
     else:
         raise ValueError("不支持的账号操作")
     return next((item for item in public_accounts() if item["id"] == account_id), None)
-
-
-def submit_otp(account_id, code):
-    initialize()
-    if auth is None or store is None:
-        raise RuntimeError("当前项目运行环境未就绪")
-    account = store.get_account(account_id)
-    if account.get("kind") != "crown_odds":
-        raise ValueError("只允许操作皇冠水位账号")
-    auth.submit_otp(account_id, code)
-    return next((item for item in public_accounts() if item["id"] == account_id), None)
-
 
 def _safe_reason(error):
     name = error.__class__.__name__

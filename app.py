@@ -14,7 +14,6 @@ from crown_runtime import (
     refresh_event_more,
     refresh_once,
     state as crown_state,
-    submit_otp,
 )
 
 HOST = "127.0.0.1"
@@ -255,13 +254,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/crown/accounts":
             try:
                 payload = self._read_json()
-                required = ("login_url", "username", "password")
+                required = ("login_url", "username")
                 if any(not isinstance(payload.get(key), str) or not payload.get(key, "").strip() for key in required):
-                    raise ValueError("登录地址、账号和密码不能为空")
-                account = add_account(
-                    payload["login_url"], payload["username"], payload["password"],
-                    payload.get("totp_secret", "") if isinstance(payload.get("totp_secret", ""), str) else "",
-                )
+                    raise ValueError("登录地址和账号不能为空")
+                account = add_account(payload["login_url"], payload["username"])
                 account = account_action(account["id"], "login") or account
                 self._send_json({"account": account}, status=201)
             except ValueError as exc:
@@ -272,19 +268,6 @@ class Handler(BaseHTTPRequestHandler):
         parts = [part for part in path.split("/") if part]
         if len(parts) == 5 and parts[:3] == ["api", "crown", "accounts"]:
             account_id, action = parts[3], parts[4]
-            if action == "otp":
-                try:
-                    payload = self._read_json()
-                    code = payload.get("code")
-                    if not isinstance(code, str):
-                        raise ValueError("动态验证码格式不正确")
-                    account = submit_otp(account_id, code)
-                    self._send_json({"account": account, "accounts": public_accounts()})
-                except (KeyError, ValueError) as exc:
-                    self._send_json({"error": str(exc)}, status=400)
-                except Exception:
-                    self._send_json({"error": "验证码提交失败"}, status=500)
-                return
             if action not in {"login", "check", "relogin", "cancel", "clear", "delete"}:
                 self._send_json({"error": "不支持的账号操作"}, status=404)
                 return

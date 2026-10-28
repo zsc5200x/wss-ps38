@@ -94,7 +94,7 @@
     <div class="settings-panel-body">
       <section class="settings-source-card">
         <div class="settings-source-head"><span>皇冠数据连接</span><span>LOCAL SESSION</span></div>
-        <div class="settings-source-copy">账号、加密凭据、浏览器会话和 OTP 都由当前项目独立管理，不会读取其他项目的账号库。</div>
+        <div class="settings-source-copy">账号和浏览器会话由当前项目独立管理；不保存密码、安全密码或 TOTP。皇冠会在平博同一个 Chrome 窗口中打开第二个普通标签页。</div>
         <div class="settings-source-actions"><button class="login-button" id="crownLoginButton" type="button"><span class="dot" aria-hidden="true"></span>皇冠登录</button></div>
       </section>
     </div>
@@ -105,17 +105,15 @@
   <section class="login-panel">
     <div class="login-panel-head"><strong id="loginTitle">皇冠登录</strong><button class="close-button" id="closeLogin" type="button" aria-label="关闭">×</button></div>
     <div class="login-panel-body">
-      <div class="login-status"><span class="login-status-indicator" id="loginIndicator"></span><div><div class="login-status-title" id="loginStatusTitle">正在检查登录会话</div><div class="login-status-copy" id="loginStatusCopy">登录成功后，当前页面会自动轮询皇冠赛事和盘口数据。</div></div></div>
+      <div class="login-status"><span class="login-status-indicator" id="loginIndicator"></span><div><div class="login-status-title" id="loginStatusTitle">正在检查登录会话</div><div class="login-status-copy" id="loginStatusCopy">皇冠会在平博同一个 Chrome 窗口中打开第二个标签页，登录需由你手动完成。</div></div></div>
       <div class="login-actions"><button class="action-button primary" id="checkCrownSession" type="button">检查全部会话</button></div>
       <form class="account-form" id="crownAccountForm">
         <label>域名或登录地址<input id="crownLoginUrl" name="login_url" placeholder="例如 https://example.com" required autocomplete="url" data-dialog-autofocus></label>
         <label>登录账号<input id="crownUsername" name="username" required autocomplete="username"></label>
-        <label>登录密码<input id="crownPassword" name="password" type="password" required autocomplete="current-password"></label>
-        <label>TOTP 密钥（可选）<input id="crownTotp" name="totp_secret" autocomplete="off"></label>
-        <div class="account-form-actions"><button class="action-button primary" type="submit">添加账号并登录</button><span class="account-form-status" id="crownAccountFormStatus"></span></div>
+        <div class="account-form-actions"><button class="action-button primary" type="submit">保存账号并打开皇冠标签页</button><span class="account-form-status" id="crownAccountFormStatus"></span></div>
       </form>
       <div class="account-list"><div class="account-list-title">当前项目保存的皇冠账号</div><div class="account-list-status" id="crownAccountsStatus" role="status" aria-live="polite"></div><div id="crownAccounts"><div class="account-empty">正在读取账号…</div></div></div>
-      <p class="login-help">账号配置、加密凭据和浏览器会话全部保存在当前项目的 data 目录及本机 Keychain 中。</p>
+      <p class="login-help">本项目不接收或保存密码、安全密码、TOTP。请在弹出的皇冠普通标签页里手动登录；系统只监听登录完成并保存站点会话。</p>
     </div>
   </section>
 </div>

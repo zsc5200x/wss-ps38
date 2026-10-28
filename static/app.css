@@ -229,8 +229,8 @@ h1,h2,h3,p{margin:0}
 .login-status-copy{color:var(--muted);font-size:.61rem;line-height:1.6}
 .account-form{display:grid;gap:10px;padding-top:13px;border-top:1px solid var(--border)}
 .account-form label{display:grid;gap:5px;color:var(--muted);font-size:.61rem;font-weight:600}
-.account-form input,.otp-form input{width:100%;min-height:38px;padding:8px 10px;color:var(--text);border:1px solid var(--border);border-radius:8px;outline:0;background:rgba(6,11,19,.55);font-size:.68rem}
-.account-form input:focus,.otp-form input:focus{border-color:rgba(66,230,164,.42);box-shadow:0 0 0 3px rgba(66,230,164,.07)}
+.account-form input{width:100%;min-height:38px;padding:8px 10px;color:var(--text);border:1px solid var(--border);border-radius:8px;outline:0;background:rgba(6,11,19,.55);font-size:.68rem}
+.account-form input:focus{border-color:rgba(66,230,164,.42);box-shadow:0 0 0 3px rgba(66,230,164,.07)}
 .account-form-status{color:var(--muted);font-size:.6rem;line-height:1.5}
 .account-list{display:grid;gap:8px;padding-top:13px;border-top:1px solid var(--border)}
 .account-list-title{color:var(--text-soft);font-size:.66rem;font-weight:650}
@@ -240,8 +240,6 @@ h1,h2,h3,p{margin:0}
 .account-row-meta,.account-row-status{color:var(--muted);font-size:.57rem;line-height:1.55;overflow-wrap:anywhere}
 .account-row-status{flex:none;color:var(--text-soft);white-space:nowrap}
 .account-row-actions .action-button{min-height:30px;padding:5px 8px;font-size:.58rem}
-.otp-form{display:flex;align-items:center;gap:7px}
-.otp-form input{flex:1;min-width:120px}
 .account-empty{padding:12px;color:var(--muted);border:1px dashed var(--border);border-radius:9px;font-size:.61rem;text-align:center}
 .app-footer{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 4px 0;color:var(--muted-2);font-family:var(--font-mono);font-size:.55rem}
 body.crown-embedded .ambient,body.crown-embedded .topbar{display:none}

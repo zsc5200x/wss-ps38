@@ -3,6 +3,7 @@ import json
 import threading
 import unittest
 from http.server import ThreadingHTTPServer
+from unittest.mock import patch
 
 import app
 
@@ -47,6 +48,9 @@ class CrownApiTests(unittest.TestCase):
         self.assertIn('href="/crown"', body)
         self.assertIn('href="/crown/static/app.css"', body)
         self.assertIn('src="/crown/static/app.js"', body)
+        self.assertNotIn("crownPassword", body)
+        self.assertNotIn("crownTotp", body)
+        self.assertNotIn("TOTP 密钥", body)
         for forbidden in ("同场对照", "/combined", "平博联赛", "pinnacleLoginForm"):
             self.assertNotIn(forbidden, body)
 
@@ -115,6 +119,25 @@ class CrownApiTests(unittest.TestCase):
             with self.subTest(method="POST", path=path):
                 status, _headers, _body = self.request("POST", path, {})
                 self.assertEqual(status, 404)
+
+    def test_otp_submission_route_is_removed(self):
+        status, _headers, _body = self.request(
+            "POST", "/api/crown/accounts/example/otp", {"code": "123456"}
+        )
+        self.assertEqual(status, 404)
+
+    def test_account_creation_needs_only_login_url_and_username(self):
+        account = {"id": "account", "status": "logging_in"}
+        with patch.object(app, "add_account", return_value=account) as add, \
+                patch.object(app, "account_action", return_value={**account, "status": "awaiting_manual"}):
+            status, _headers, body = self.request(
+                "POST", "/api/crown/accounts",
+                {"login_url": "https://hga038.com", "username": "member"},
+            )
+
+        self.assertEqual(status, 201)
+        add.assert_called_once_with("https://hga038.com", "member")
+        self.assertEqual(json.loads(body)["account"]["status"], "awaiting_manual")
 
 
 if __name__ == "__main__":

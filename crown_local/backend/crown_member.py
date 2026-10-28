@@ -350,7 +350,7 @@ class CrownMemberMonitor:
                 if account.get("kind") == "crown_odds" and account.get("enabled") and account.get("has_session")]
 
     def _is_busy(self, account):
-        return account.get("status") in ("logging_in", "checking", "awaiting_otp", "awaiting_manual")
+        return account.get("status") in ("logging_in", "checking", "awaiting_manual")
 
     def _identity(self, account, session):
         return (account.get("revision"), session.get("uid"), session.get("saved_at"))

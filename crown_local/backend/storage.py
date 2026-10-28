@@ -20,12 +20,11 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 import uuid
 
 from cryptography.fernet import Fernet, InvalidToken
-from .totp import normalize_secret as normalize_totp_secret
 
 KINDS = {'crown_odds': 'crown.sqlite3'}
 DEFAULT_PATHS = {'crown_odds': '/'}
 AUTHENTICATED = {'authenticated'}
-BUSY = {'logging_in', 'awaiting_otp', 'awaiting_manual', 'checking'}
+BUSY = {'logging_in', 'awaiting_manual', 'checking'}
 _FAKE_IP_NETWORK = ipaddress.ip_network('198.18.0.0/15')
 _DOH_ENDPOINT = 'https://dns.google/resolve'
 _DOH_TIMEOUT = 4
@@ -294,6 +293,17 @@ class Store:
                 if 'revision' not in {r['name'] for r in c.execute('PRAGMA table_info(accounts)')}:
                     c.execute('ALTER TABLE accounts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1')
                 c.execute("UPDATE accounts SET status=CASE WHEN enabled=0 THEN 'disabled' WHEN session IS NOT NULL THEN 'session_received' ELSE 'idle' END, last_error='' WHERE status IN ('logging_in','awaiting_otp','awaiting_manual','checking','authenticated')")
+                # Credentials are no longer accepted by this project. Overwrite
+                # legacy password/safe-password/TOTP blobs with an empty
+                # encrypted object while keeping the encrypted session intact.
+                for row in c.execute('SELECT id, credentials FROM accounts').fetchall():
+                    try:
+                        legacy = self.vault.decrypt(row['credentials']) if row['credentials'] else {}
+                    except RuntimeError:
+                        legacy = None
+                    if legacy != {}:
+                        c.execute('UPDATE accounts SET credentials=? WHERE id=?',
+                                  (self.vault.encrypt({}), row['id']))
             os.chmod(self.directory / KINDS[kind], 0o600)
 
     def _find(self, account_id):
@@ -305,11 +315,8 @@ class Store:
         raise KeyError('账号不存在')
 
     def _public(self, row):
-        credentials = self.vault.decrypt(row['credentials']) if row['credentials'] else {}
         return {**{k: row[k] for k in ('id','kind','name','source_id','base_url','login_path','username','role','login_layer','interval','status','last_login','last_checked','last_error','created_at','updated_at','revision')},
-                'enabled': bool(row['enabled']), 'has_password': bool(row['credentials']),
-                'has_totp_secret': bool(credentials and credentials.get('totp_secret')),
-                'has_session': bool(row['session'])}
+                'enabled': bool(row['enabled']), 'has_session': bool(row['session'])}
 
     def get_account(self, account_id):
         return self._public(self._find(account_id))
@@ -324,7 +331,7 @@ class Store:
     def save_account(self, payload, account_id=None):
         with self._lock:
             old = self._find(account_id) if account_id else None
-            allowed = {'kind','name','source_id','base_url','login_path','username','password','safe_password','totp_secret','clear_totp_secret','role','login_layer','enabled','interval'}
+            allowed = {'kind','name','source_id','base_url','login_path','username','role','login_layer','enabled','interval'}
             if set(payload) - allowed:
                 raise ValueError('存在不支持的账号字段')
             if old and old['status'] in BUSY:
@@ -360,32 +367,10 @@ class Store:
                 raise ValueError('主备角色或皇冠登录层级不正确')
             if type(values['enabled']) is not bool or type(values['interval']) is not int or not 15 <= values['interval'] <= 3600:
                 raise ValueError('启用状态必须为布尔值，间隔必须为15至3600秒')
-            password = payload.get('password', '')
-            safe = payload.get('safe_password', None)
-            totp_secret = payload.get('totp_secret', '')
-            clear_totp_secret = payload.get('clear_totp_secret', False)
-            if (not isinstance(password, str) or len(password) > 1024
-                    or (safe is not None and (not isinstance(safe, str) or len(safe) > 1024))
-                    or not isinstance(totp_secret, str) or len(totp_secret) > 128
-                    or type(clear_totp_secret) is not bool
-                    or (clear_totp_secret and totp_secret.strip())):
-                raise ValueError('凭据格式或长度不正确')
-            normalized_totp = normalize_totp_secret(totp_secret) if totp_secret.strip() else ''
-            credentials = self.vault.decrypt(old['credentials']) if old else {'password':'','safe_password':''}
-            if password:
-                credentials['password'] = password
-            if safe is not None and (safe or not old):
-                credentials['safe_password'] = safe
-            if normalized_totp:
-                credentials['totp_secret'] = normalized_totp
-            if clear_totp_secret:
-                credentials['totp_secret'] = ''
-            if not credentials.get('password'):
-                raise ValueError('新增账号需要填写密码')
             if len(self.accounts()) >= 100 and not old:
                 raise ValueError('本机版本最多保存100个账号')
-            invalidates = not old or any(values[k] != old[k] for k in ('base_url','login_path','username','source_id','login_layer')) or bool(password or safe)
-            values.update(id=identity, enabled=int(values['enabled']), credentials=self.vault.encrypt(credentials),
+            invalidates = not old or any(values[k] != old[k] for k in ('base_url','login_path','username','source_id','login_layer'))
+            values.update(id=identity, enabled=int(values['enabled']), credentials=self.vault.encrypt({}),
                           session=None if invalidates else old['session'], status='disabled' if not values['enabled'] else ('idle' if invalidates else old['status']),
                           last_login=old['last_login'] if old else None, last_checked=old['last_checked'] if old else None,
                           last_error='', revision=old['revision']+1 if old else 1, created_at=old['created_at'] if old else now(), updated_at=now())
@@ -394,7 +379,7 @@ class Store:
             with self._db(values['kind']) as c:
                 keys=list(values)
                 c.execute('INSERT OR REPLACE INTO accounts ('+','.join(keys)+') VALUES ('+','.join('?' for _ in keys)+')', [values[k] for k in keys])
-            self.add_log(values['kind'], values['id'], 'account_saved', 'success', '账号配置已加密保存' if not old else '账号配置已更新')
+            self.add_log(values['kind'], values['id'], 'account_saved', 'success', '账号配置已保存' if not old else '账号配置已更新')
             return self.get_account(values['id'])
 
     def delete_account(self, account_id):
@@ -402,10 +387,7 @@ class Store:
             row = self._find(account_id)
             with self._db(row['kind']) as c:
                 c.execute('DELETE FROM accounts WHERE id=?', (account_id,))
-            self.add_log(row['kind'], account_id, 'account_deleted', 'success', '账号配置和凭据已删除')
-
-    def get_credentials(self, account_id):
-        return self.vault.decrypt(self._find(account_id)['credentials'])
+            self.add_log(row['kind'], account_id, 'account_deleted', 'success', '账号配置和会话已删除')
 
     def load_session(self, account_id):
         row=self._find(account_id)

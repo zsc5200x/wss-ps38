@@ -1,8 +1,9 @@
-"""Account-isolated browser login with encrypted persistence supplied by Store.
+"""Manual Crown login in the shared Chrome profile with encrypted sessions.
 
-All Playwright objects live on one worker thread. Passwords are typed into the
-site's own form so site scripts create their own device and version parameters.
-No captured credentials or fingerprint headers are replayed.
+All Playwright objects live on one worker thread. The project never accepts,
+stores, fills, or submits the member's password, safe password, or TOTP. It
+opens a normal Crown tab in the same Chrome profile as Pinnacle, observes the
+site's own request/response flow, and saves only Crown-scoped session state.
 """
 from dataclasses import dataclass, field
 from copy import deepcopy
@@ -20,7 +21,6 @@ from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlsplit
 
 from .providers import KINDS, MAX_RESPONSE_BYTES, parse_login_response, parse_member_login_domain
 from .storage import SessionChangedError
-from .totp import TOTP_INTERVAL, generate_code
 
 
 def _now():
@@ -112,9 +112,8 @@ class _Job:
     uid: str = field(default="", repr=False)
     evidence: object = None
     next_screenshot: float = 0
-    login_attempted: bool = False
     restore: bool = False
-    form_pending: bool = False
+    owns_context: bool = False
     member_origin: str = ""
     member_authenticated: bool = False
     session_storage: dict = field(default_factory=dict, repr=False)
@@ -129,8 +128,6 @@ class _Job:
     member_resume_query: dict = field(default_factory=dict, repr=False)
     member_ui_verified: bool = False
     ui_verified_at: float = 0
-    totp_submitted_counter: int = -1
-    totp_attempts: int = 0
     transient_failures: int = 0
     retry_at: float = 0
     stage: str = "open_page"
@@ -148,7 +145,7 @@ class AuthService:
         self._browser = None
         self._background_browser = None
         self._browser_shared = False
-        self._visible_contexts = {}
+        self._visible_pages = {}
         self._playwright = None
         self._destinations = {}
         self._thread = threading.Thread(target=self._run, name="account-login", daemon=True)
@@ -165,13 +162,13 @@ class AuthService:
     def _enqueue(self, action, account_id, payload=None):
         with self._lock:
             account = self._account(account_id)
-            if action in {"start", "test", "otp"} and not account.get("enabled", True):
+            if action in {"start", "test"} and not account.get("enabled", True):
                 raise ValueError("账号已停用，请先启用。")
             if self._stop.is_set():
                 raise ValueError("登录服务已关闭。")
             if action in {"start", "test"}:
                 background = action == "test" and bool((payload or {}).get("background"))
-                if (account_id in self._jobs or account.get("status") in {"logging_in", "checking", "awaiting_otp", "awaiting_manual"}
+                if (account_id in self._jobs or account.get("status") in {"logging_in", "checking", "awaiting_manual"}
                         or account_id in getattr(self, "_pending_checks", set())):
                     raise ValueError("该账号已有登录任务，请先完成或停止。")
                 expected = {"expected_revision": account["revision"]} if account.get("revision") is not None else {}
@@ -196,15 +193,6 @@ class AuthService:
         self._enqueue("start", account_id)
         return self.store.get_account(account_id)
 
-    def submit_otp(self, account_id, code):
-        code = str(code).strip()
-        if not code.isascii() or not code.isdigit() or not 4 <= len(code) <= 10:
-            raise ValueError("请输入 4 至 10 位数字动态码。")
-        account = self._account(account_id)
-        if account.get("status") != "awaiting_otp":
-            raise ValueError("该账号当前没有等待动态验证码的登录任务。")
-        return self._enqueue("otp", account_id, code)
-
     def test(self, account_id, background=False):
         return self._enqueue("test", account_id, {"background": bool(background)})
 
@@ -222,7 +210,7 @@ class AuthService:
     def browser_open(self, account_id):
         # HTTP handlers only read worker metadata, never Playwright objects.
         job = self._jobs.get(account_id)
-        retained = account_id in self._visible_contexts
+        retained = account_id in self._visible_pages
         return bool(retained or (job and self._is_current(job)))
 
     def close(self):
@@ -350,8 +338,6 @@ class AuthService:
                         if action == "cancel":
                             self._set(account_id, "idle", "已停止本次登录；已保存的会话保持不变。")
                             self._dispose(account_id)
-                        elif action == "otp":
-                            self._otp(account_id, payload)
                         else:
                             self._begin(account_id, restore=action == "test",
                                         background=bool((payload or {}).get("background")))
@@ -365,7 +351,7 @@ class AuthService:
                         payload = None
                 self._tick()
         finally:
-            for account_id in list(self._jobs) + list(self._visible_contexts):
+            for account_id in list(self._jobs) + list(self._visible_pages):
                 self._dispose(account_id)
             closed = set()
             for browser in (self._browser, self._background_browser):
@@ -390,11 +376,27 @@ class AuthService:
                 except Exception:
                     pass
 
+    def _acquire_context(self, browser, account, stored):
+        """Return Chrome's default context for a normal tab, or a private fallback.
+
+        CDP-connected Chrome has a default persistent context. Reusing it keeps
+        Pinnacle and Crown in one browser window. A standalone Playwright launch
+        has no default context, so only that development fallback creates one.
+        """
+        if self._browser_shared:
+            if not browser.contexts:
+                raise RuntimeError("平博 Chrome 中没有可用的普通浏览上下文。")
+            return browser.contexts[0], False
+        context_args = {"viewport": {"width": 1100, "height": 800}}
+        if stored:
+            context_args["storage_state"] = stored.get("storage_state", {"cookies": [], "origins": []})
+        return browser.new_context(**context_args), True
+
     def _begin(self, account_id, restore=False, background=False):
         account = self._account(account_id)
         if not account.get("enabled", True):
             return
-        if background and account_id in self._visible_contexts:
+        if background and account_id in self._visible_pages:
             # A user-visible Crown tab is already open. Do not replace it with
             # a scheduled check whose isolated context would immediately close.
             return
@@ -419,17 +421,11 @@ class AuthService:
         if stored and account["kind"] == "crown_odds" and self._check_saved_member(check_account, stored):
             return
         browser = self._launch(background=background)
-        context_args = {
-            "viewport": {"width": 1100, "height": 800},
-            "ignore_https_errors": _allow_insecure_certificate(account),
-        }
-        if stored:
-            context_args["storage_state"] = stored.get("storage_state", {"cookies": [], "origins": []})
-        context = browser.new_context(**context_args)
-        context.set_default_timeout(2500)
-        context.set_default_navigation_timeout(8000 if background else 30000)
-        context.route("**/*", lambda route: self._guard_destination(route, self._jobs.get(account_id)))
+        context, owns_context = self._acquire_context(browser, account, stored)
         page = context.new_page()
+        page.set_default_timeout(2500)
+        page.set_default_navigation_timeout(8000 if background else 30000)
+        page.route("**/*", lambda route: self._guard_destination(route, self._jobs.get(account_id)))
         if not background:
             try:
                 # The CDP connection owns the same Chrome process as Pingbo.
@@ -438,9 +434,10 @@ class AuthService:
                 page.bring_to_front()
             except Exception:
                 pass
-        job = _Job(account_id, account, context, page, time.monotonic() + (35 if background else 300),
+        job = _Job(account_id, account, context, page, time.monotonic() + (35 if background else 1800),
                    status="checking" if restore else "logging_in", uid=(stored or {}).get("uid", ""), restore=restore,
-                   background=background, session_saved=bool(existing_session), session_baseline=existing_session)
+                   background=background, owns_context=owns_context, session_saved=bool(existing_session),
+                   session_baseline=existing_session)
         self._jobs[account_id] = job
         if stored:
             self._restore_member(job, stored)
@@ -453,10 +450,11 @@ class AuthService:
                 return
             login_url = self._member_resume_url(job) or login_url
         job.navigation_url = login_url
-        # Login responses may be issued by frames or popups, so observe context.
+        # Observe only Crown's own tab. Listening on the shared context would
+        # also capture Pinnacle traffic and can persist the wrong cookies.
         page.on("framenavigated", lambda frame: self._observe_member_navigation(job, frame))
-        context.on("request", lambda request: self._observe_member_request(job, request))
-        context.on("response", lambda response: self._response(job, response))
+        page.on("request", lambda request: self._observe_member_request(job, request))
+        page.on("response", lambda response: self._response(job, response))
         for attempt in range(3):
             try:
                 page.goto(login_url, wait_until="domcontentloaded")
@@ -482,9 +480,12 @@ class AuthService:
                 if not self._defer_transient(job, exc):
                     raise
             return
-        job.stage = "login_form"
+        job.stage = "check_page"
+        job.status = "awaiting_manual"
+        self._set(account_id, "awaiting_manual",
+                  "已打开皇冠普通标签页。请在该标签页手动登录；系统不会填写或提交账号密码，只监听并保存登录会话。")
         try:
-            self._fill_login(job)
+            self._check_page(job)
         except Exception as exc:
             if not self._defer_transient(job, exc):
                 raise
@@ -658,7 +659,7 @@ class AuthService:
                                    if self._trusted_page(job, origin) and isinstance(values, dict)}
         if job.session_storage:
             data = json.dumps(job.session_storage, ensure_ascii=True)
-            job.context.add_init_script("""(() => {
+            job.page.add_init_script("""(() => {
                 const states = """ + data + """;
                 const values = states[location.origin];
                 if (values) for (const [key, value] of Object.entries(values)) {
@@ -793,111 +794,39 @@ class AuthService:
                 continue
         return None
 
-    def _fill_login(self, job):
-        if not self._is_current(job):
-            return
-        job.form_pending = False
-        credentials = self.store.get_credentials(job.account_id)
-        password = credentials.get("password", "")
-        if not password:
-            raise RuntimeError("尚未保存登录密码，请先编辑账号。")
-        username_selectors = [
-            'input[name="username"]', '#username', 'input[name="user"]', '#user',
-            'input[name="usr"]', '#usr',
-            'input[name="account"]', '#account', 'input[autocomplete="username"]',
-            'input[name="loginName"]', '#loginName', 'input[name="loginname"]',
-        ]
-        password_selectors = [
-            'input[name="password"]', 'input[name="pwd"]', '#password', '#pwd',
-            'input[type="password"]:not([name="safe"]):not([name="pwd_safe"])',
-        ]
-        for frame in job.page.frames:
-            if not self._trusted_page(job, frame.url):
-                continue
-            # Layer selection may replace the form or reveal another panel.
-            # Resolve the currently visible fields after the site's own switch.
-            username = self._visible_locator(frame, username_selectors)
-            if username is None and job.account["kind"] == "crown_odds":
-                for label in ("登入账号", "登录账号", "用户名", "账号"):
-                    try:
-                        labeled = frame.get_by_label(label, exact=False)
-                        for index in range(min(labeled.count(), 3)):
-                            candidate = labeled.nth(index)
-                            if candidate.is_visible() and candidate.is_enabled():
-                                username = candidate
-                                break
-                    except Exception:
-                        continue
-                    if username is not None:
-                        break
-            if username is None and job.account["kind"] == "crown_odds":
-                username = self._visible_locator(frame, [
-                    'input[placeholder*="账号"]', 'input[placeholder*="用户名"]',
-                    'input[aria-label*="账号"]', 'input[aria-label*="用户名"]',
-                ])
-                if username is None:
-                    candidates = []
-                    inputs = frame.locator(
-                        'input:visible:not([type="hidden"]):not([type="password"]):not([type="submit"]):not([type="button"]):not([type="checkbox"]):not([type="radio"])'
-                    )
-                    for index in range(inputs.count()):
-                        item = inputs.nth(index)
-                        if not item.is_enabled():
-                            continue
-                        identity = " ".join((
-                            item.get_attribute("name") or "",
-                            item.get_attribute("id") or "",
-                            item.get_attribute("placeholder") or "",
-                            item.get_attribute("aria-label") or "",
-                        )).lower()
-                        if any(token in identity for token in ("captcha", "verify", "otp", "code", "safe")):
-                            continue
-                        candidates.append(item)
-                    if len(candidates) == 1:
-                        username = candidates[0]
-            password_input = self._visible_locator(frame, password_selectors)
-            if username is None or password_input is None:
-                continue
-            username.fill(job.account["username"])
-            password_input.fill(password)
-            if credentials.get("safe_password"):
-                safe_input = self._visible_locator(frame, ['input[name="safe"]', '#safe', '#pwd_safe', 'input[name="pwd_safe"]', 'input[name="safe_password"]'])
-                if safe_input is None:
-                    self._manual(job, "已配置安全密码，但页面未找到对应输入框，请在本机浏览器确认。")
-                    return
-                safe_input.fill(credentials["safe_password"])
-            # Do not submit over image/CAPTCHA challenges or hidden iframes. OTP
-            # follows account authentication and is handled by its own form.
-            captcha = self._visible_locator(frame, [
-                'input[name*="captcha" i]', 'input[id*="captcha" i]',
-                'iframe[src*="recaptcha"]', 'iframe[src*="hcaptcha"]',
-                'input[name="checkCode"]', 'input[name="verifyCode"]',
-            ])
-            if captcha is not None:
-                self._manual(job, "页面需要验证码，请在本机打开的浏览器完成；云端可查看截图。")
-                return
-            submit = self._visible_locator(frame, [
-                'button[type="submit"]', 'input[type="submit"]', '#login_btn', '#btn_login', '#login', '#btnLogin',
-                '[name="login"]', '#loginBtn', 'button:has-text("登录")',
-                'button:has-text("登入")', 'button:has-text("Login")',
-                '[role="button"]:text-is("登入")', '[role="button"]:text-is("登录")',
-                '[role="button"]:text-is("Login")', ':text-is("登入")',
-                'a:has-text("登录")', 'a:has-text("登入")',
-            ])
-            job.login_attempted = True
-            if submit is not None:
-                submit.click()
-            else:
-                password_input.press("Enter")
-            self._log(job.account_id, "login", "logging_in", "已通过站点正常页面提交登录表单。")
-            return
-        job.form_pending = True
-        job.status = "logging_in"
-        self._set(job.account_id, "logging_in", "正在识别登录表单，暂未检测到验证步骤。")
-
     def _manual(self, job, message):
         job.status = "awaiting_manual"
         self._set(job.account_id, job.status, message)
+
+    def _scoped_storage_state(self, job):
+        """Read Chrome state but retain only origins belonging to Crown."""
+        raw = job.context.storage_state()
+        urls = [job.account.get("base_url", ""), job.member_origin, job.resume_url, job.page.url]
+        try:
+            urls.extend(frame.url for frame in job.page.frames)
+        except Exception:
+            pass
+        trusted_urls = [url for url in urls if url and self._trusted_page(job, url)]
+        trusted_origins = {_origin(url) for url in trusted_urls}
+        allowed_hosts = {urlsplit(url).hostname for url in trusted_urls if urlsplit(url).hostname}
+
+        def cookie_belongs_to_crown(cookie):
+            domain = str(cookie.get("domain") or "").lstrip(".").lower().rstrip(".")
+            return bool(domain and any(host == domain or host.endswith("." + domain)
+                                       for host in allowed_hosts))
+
+        cookies = [cookie for cookie in raw.get("cookies", [])
+                   if isinstance(cookie, dict) and cookie_belongs_to_crown(cookie)]
+        origins = []
+        for item in raw.get("origins", []):
+            if not isinstance(item, dict):
+                continue
+            try:
+                if _origin(item.get("origin", "")) in trusted_origins:
+                    origins.append(item)
+            except (TypeError, ValueError):
+                continue
+        return {"cookies": cookies, "origins": origins}
 
     def _response(self, job, response):
         try:
@@ -954,7 +883,7 @@ class AuthService:
                 job.resume_url = urlsplit(job.page.url)._replace(query="", fragment="").geturl()
         expected = {"expected_revision": job.account["revision"]} if job.account.get("revision") is not None else {}
         try:
-            storage_state = job.context.storage_state()
+            storage_state = self._scoped_storage_state(job)
         except Exception:
             raise _SessionSaveError("browser snapshot failed") from None
         session = {
@@ -1005,70 +934,8 @@ class AuthService:
             self._dispose(job.account_id)
             return False
 
-    def _otp(self, account_id, code):
-        job = self._jobs.get(account_id)
-        if not job or not self._is_current(job) or job.status != "awaiting_otp":
-            raise RuntimeError("验证码会话已结束，请重新开始登录。")
-        job.totp_attempts = 0
-        job.totp_submitted_counter = int(time.time() // TOTP_INTERVAL)
-        self._submit_otp_code(job, code)
-
-    def _submit_otp_code(self, job, code, automatic=False):
-        for frame in job.page.frames:
-            if not self._trusted_page(job, frame.url):
-                continue
-            field = self._visible_locator(frame, [
-                'input[name="otpCode"]', '#otpCode', 'input[autocomplete="one-time-code"]',
-                'input[name="otp"]', '#otp', 'input[name="code"]', 'input[inputmode="numeric"]',
-                'input[name*="authenticator" i]', 'input[id*="authenticator" i]',
-                'input[name*="verifycode" i]', 'input[id*="verifycode" i]',
-                'input[type="tel"]', 'input[type="number"]', 'input[maxlength="6"]',
-            ])
-            if field is None:
-                continue
-            field.fill(code)
-            button = self._visible_locator(frame, [
-                'button[type="submit"]', 'input[type="submit"]',
-                'button:has-text("提交")', 'button:has-text("验证")', 'button:has-text("Submit")',
-            ])
-            if button is not None:
-                button.click()
-            else:
-                field.press("Enter")
-            job.deadline = time.monotonic() + 180
-            message = ("已自动提交二次验证动态码，正在等待站点确认。" if automatic
-                       else "动态码已提交，正在等待站点验证。")
-            self._set(job.account_id, "awaiting_otp", message)
-            return
-        self._manual(job, "未找到动态码输入框，请在本机浏览器完成验证，或重新登录。")
-
-    def _auto_submit_totp(self, job):
-        """Submit at most one code per time step and stop after three attempts."""
-        secret = self.store.get_credentials(job.account_id).get("totp_secret", "")
-        if not secret:
-            return False
-        try:
-            code, counter, remaining = generate_code(secret)
-        except ValueError:
-            self._set(job.account_id, "awaiting_otp",
-                      "已保存的二次验证密钥无法使用，请编辑账号更新密钥，或手动输入验证码。")
-            return True
-        if counter == job.totp_submitted_counter:
-            return True
-        if remaining <= 5:
-            self._set(job.account_id, "awaiting_otp", "正在等待下一个有效动态码周期。")
-            return True
-        if job.totp_attempts >= 3:
-            self._set(job.account_id, "awaiting_otp",
-                      "自动二次验证已尝试三次，请检查密钥或手动输入验证码。")
-            return True
-        job.totp_submitted_counter = counter
-        job.totp_attempts += 1
-        self._submit_otp_code(job, code, automatic=True)
-        return True
-
-    def _otp_challenge(self, frame):
-        """Recognize an explicit authenticator prompt without mistaking CAPTCHA for OTP."""
+    def _manual_challenge(self, frame):
+        """Recognize a second-factor prompt that the user must handle manually."""
         field = self._visible_locator(frame, [
             'input[autocomplete="one-time-code"]', 'input[name*="otp" i]', 'input[id*="otp" i]',
             'input[name*="authenticator" i]', 'input[id*="authenticator" i]',
@@ -1108,24 +975,13 @@ class AuthService:
             self._manual(job, "页面位于其他来源，尚未确认会话；请核对配置域名。")
             return
         trusted_frames = [frame for frame in job.page.frames if self._trusted_page(job, frame.url)]
-        if any(self._otp_challenge(frame) for frame in trusted_frames):
-            if job.status != "awaiting_otp":
-                job.deadline = time.monotonic() + 600
-            job.status = "awaiting_otp"
-            if not self._auto_submit_totp(job):
-                self._set(job.account_id, job.status, "网站要求输入身份验证器动态码，请填写本次有效验证码。")
+        if any(self._manual_challenge(frame) for frame in trusted_frames):
+            self._set(job.account_id, "awaiting_manual",
+                      "网站要求验证码或二次验证，请在皇冠普通标签页中手动完成。")
+            job.status = "awaiting_manual"
             return
 
-        otp_was_pending = job.status == "awaiting_otp"
-        if otp_was_pending:
-            job.totp_attempts = 0
-            job.totp_submitted_counter = -1
-            job.status = "logging_in"
-            self._set(job.account_id, job.status, "已离开动态码验证页，正在确认登录结果。")
-
         for frame in trusted_frames:
-            if self._dismiss_member_quick_password_prompt(frame):
-                return
             password_field = self._visible_locator(frame, ['input[type="password"]'])
             if password_field is not None:
                 if job.background:
@@ -1134,33 +990,16 @@ class AuthService:
                     self._set(job.account_id, "expired", "后台检查确认页面已返回登录表单；会话已失效。", last_checked=_now())
                     self._dispose(job.account_id)
                     return
-                if otp_was_pending and not job.restore:
-                    self._manual(job, "动态码页面已离开，但仍返回登录表单，尚未确认成功；请查看浏览器提示。")
-                    return
-                if job.restore and _origin(frame.url) == _origin(job.account["base_url"]):
-                    job.restore = False
-                    job.uid = ""
-                    job.member_authenticated = False
-                    job.member_ui_verified = False
-                    job.member_protocol = {}
-                    job.member_resume_query = {}
-                    job.status = "logging_in"
-                    self._set(job.account_id, "logging_in", "旧会话已回到登录页，正在尝试一次重新登录；验证码仍需你处理。", last_checked=_now())
-                    self._fill_login(job)
-                elif job.restore:
-                    job.restore = False
-                    job.uid = ""
-                    job.member_authenticated = False
-                    job.member_ui_verified = False
-                    job.member_protocol = {}
-                    job.member_resume_query = {}
-                    job.session_storage = {}
-                    job.status = "logging_in"
-                    self._set(job.account_id, "logging_in", "会员会话已失效，正在返回登录入口重新登录。", last_checked=_now())
-                    entry = urljoin(job.account["base_url"].rstrip("/") + "/", job.account.get("login_path") or "/")
-                    job.page.goto(entry, wait_until="domcontentloaded")
-                    if _origin(job.page.url) == _origin(job.account["base_url"]):
-                        self._fill_login(job)
+                job.restore = False
+                job.uid = ""
+                job.member_authenticated = False
+                job.member_ui_verified = False
+                job.member_protocol = {}
+                job.member_resume_query = {}
+                self._set(job.account_id, "awaiting_manual",
+                          "皇冠页面正在等待手动登录。请直接在普通标签页输入账号、密码及页面要求的验证码。",
+                          last_checked=_now())
+                job.status = "awaiting_manual"
                 return
             logout = self._visible_locator(frame, [
                 'a:has-text("退出登录")', 'button:has-text("退出登录")',
@@ -1186,7 +1025,10 @@ class AuthService:
                 if not self._persist_verified(job):
                     return
                 self._set(job.account_id, "authenticated", "站点显示已登录界面，会话已保存；订单/盘口读取权限尚未验证。", last_checked=_now())
-                self._dispose(job.account_id)
+                if job.background:
+                    self._dispose(job.account_id)
+                else:
+                    self._retain_visible(job.account_id)
                 return
         if job.restore:
             job.member_ui_verified = False
@@ -1194,23 +1036,6 @@ class AuthService:
             job.status = "session_received"
             if not job.background:
                 self._set(job.account_id, "session_received", "已载入保存会话，但页面不足以确认仍然有效；稍后可重新检查。", last_checked=_now())
-
-
-    def _dismiss_member_quick_password_prompt(self, frame):
-        try:
-            prompt = frame.get_by_text(re.compile(r"[你您]要设置一个简易密码以便快速登入吗"), exact=False)
-            if not prompt.is_visible():
-                return False
-            decline = self._visible_locator(frame, [
-                'button:text-is("否")', 'input[type="button"][value="否"]',
-                'a:text-is("否")', '[role="button"]:text-is("否")', 'div:text-is("否")',
-            ])
-            if decline is None:
-                return False
-            decline.click()
-            return True
-        except Exception:
-            return False
 
 
     def _member_signed_in(self, frame):
@@ -1276,7 +1101,6 @@ class AuthService:
                             # busy and the old snapshot until the signed-in UI
                             # is confirmed, so monitoring cannot race the login.
                             job.status = "logging_in"
-                            job.form_pending = False
                             job.next_screenshot = 0
                             self._set(account_id, "logging_in", "会员登录响应已成功，正在等待会员页面完成并保存完整会话。")
                             self._log(account_id, "login", "logging_in", "会员登录响应已成功，等待页面完成会话。")
@@ -1296,9 +1120,7 @@ class AuthService:
                         self._set(account_id, evidence.status, evidence.message)
                 if time.monotonic() >= job.next_screenshot:
                     job.next_screenshot = time.monotonic() + 3
-                    if job.status in {"logging_in", "awaiting_manual"} and job.form_pending:
-                        self._fill_login(job)
-                    if job.status in {"logging_in", "awaiting_manual", "awaiting_otp", "session_received", "checking"}:
+                    if job.status in {"logging_in", "awaiting_manual", "session_received", "checking"}:
                         job.stage = "check_page"
                         self._check_page(job)
                     if self._jobs.get(account_id) is not job:
@@ -1363,8 +1185,6 @@ class AuthService:
             return
         if job.stage == "open_page":
             job.page.goto(job.navigation_url, wait_until="domcontentloaded", timeout=8000 if job.background else 30000)
-        elif job.stage == "login_form" and not job.login_attempted:
-            self._fill_login(job)
         else:
             self._check_page(job)
 
@@ -1395,11 +1215,22 @@ class AuthService:
         job = self._jobs.pop(account_id, None)
         with self._lock:
             self._screenshots.pop(account_id, None)
-            retained = self._visible_contexts.pop(account_id, None)
-        contexts = [item.context for item in (job, retained) if item]
-        for context in contexts:
+            retained = self._visible_pages.pop(account_id, None)
+        closed_contexts = set()
+        for item in (job, retained):
+            if not item:
+                continue
+            context = item.context
+            if getattr(item, "owns_context", False) and id(context) not in closed_contexts:
+                closed_contexts.add(id(context))
+                try:
+                    context.close()
+                    continue
+                except Exception:
+                    pass
             try:
-                context.close()
+                if not item.page.is_closed():
+                    item.page.close()
             except Exception:
                 pass
 
@@ -1410,11 +1241,12 @@ class AuthService:
             return
         with self._lock:
             self._screenshots.pop(account_id, None)
-            previous = self._visible_contexts.pop(account_id, None)
-            self._visible_contexts[account_id] = job
-        if previous and previous.context is not job.context:
+            previous = self._visible_pages.pop(account_id, None)
+            self._visible_pages[account_id] = job
+        if previous and previous.page is not job.page:
             try:
-                previous.context.close()
+                if not previous.page.is_closed():
+                    previous.page.close()
             except Exception:
                 pass
         try:
