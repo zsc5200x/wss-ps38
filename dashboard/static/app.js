@@ -14,6 +14,7 @@
     pagePanels: [...document.querySelectorAll("[data-page-panel]")],
     pauseButton: $("pauseButton"),
     refreshButton: $("refreshButton"),
+    crownLoginButton: $("crownLoginButton"),
     crownFrame: $("crownFrame"),
     metadataMaintenance: $("metadataMaintenance"),
     metadataCheckButton: $("metadataCheckButton"),
@@ -127,6 +128,8 @@
     currentPage: "home",
   };
 
+  let crownFrameReady = false;
+  let crownLoginPending = false;
 
   function el(tag, className = "", text = "") {
     const node = document.createElement(tag);
@@ -693,6 +696,7 @@
     const target = resolvePage(page);
     state.currentPage = target;
     document.body.classList.toggle("crown-mode", target === "crown");
+    dom.crownLoginButton?.classList.toggle("hidden", target !== "crown");
     for (const button of dom.primaryNav.querySelectorAll("[data-page]")) {
       const active = button.dataset.page === target;
       button.classList.toggle("active", active);
@@ -1830,6 +1834,15 @@
     showToast(state.paused ? "已暂停自动刷新" : "已恢复自动刷新");
   });
 
+  dom.crownLoginButton?.addEventListener("click", () => {
+    ensureCrownFrameLoaded();
+    if (crownFrameReady) {
+      postCrownCommand("open-login");
+    } else {
+      crownLoginPending = true;
+    }
+  });
+
   dom.refreshButton.addEventListener("click", () => {
     if (state.currentPage === "crown") {
       postCrownCommand("refresh");
@@ -1856,7 +1869,12 @@
   });
 
   dom.crownFrame?.addEventListener("load", () => {
+    crownFrameReady = true;
     postCrownCommand("set-paused", { paused: state.crownPaused });
+    if (crownLoginPending) {
+      crownLoginPending = false;
+      postCrownCommand("open-login");
+    }
   });
 
   dom.metadataCheckButton.addEventListener("click", () => {
