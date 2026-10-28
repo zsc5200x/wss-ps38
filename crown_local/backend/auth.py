@@ -148,6 +148,7 @@ class AuthService:
         self._browser = None
         self._background_browser = None
         self._browser_shared = False
+        self._visible_contexts = {}
         self._playwright = None
         self._destinations = {}
         self._thread = threading.Thread(target=self._run, name="account-login", daemon=True)
@@ -221,7 +222,8 @@ class AuthService:
     def browser_open(self, account_id):
         # HTTP handlers only read worker metadata, never Playwright objects.
         job = self._jobs.get(account_id)
-        return bool(job and self._is_current(job))
+        retained = account_id in self._visible_contexts
+        return bool(retained or (job and self._is_current(job)))
 
     def close(self):
         self._stop.set()
@@ -363,7 +365,7 @@ class AuthService:
                         payload = None
                 self._tick()
         finally:
-            for account_id in list(self._jobs):
+            for account_id in list(self._jobs) + list(self._visible_contexts):
                 self._dispose(account_id)
             closed = set()
             for browser in (self._browser, self._background_browser):
@@ -391,6 +393,10 @@ class AuthService:
     def _begin(self, account_id, restore=False, background=False):
         account = self._account(account_id)
         if not account.get("enabled", True):
+            return
+        if background and account_id in self._visible_contexts:
+            # A user-visible Crown tab is already open. Do not replace it with
+            # a scheduled check whose isolated context would immediately close.
             return
         if len(self._jobs) >= 8 and account_id not in self._jobs:
             raise RuntimeError("同时打开的登录浏览器已达 8 个，请先停止其他任务。")
@@ -424,6 +430,14 @@ class AuthService:
         context.set_default_navigation_timeout(8000 if background else 30000)
         context.route("**/*", lambda route: self._guard_destination(route, self._jobs.get(account_id)))
         page = context.new_page()
+        if not background:
+            try:
+                # The CDP connection owns the same Chrome process as Pingbo.
+                # Raise Crown's isolated window only for user-triggered work so
+                # scheduled heartbeat checks do not steal focus.
+                page.bring_to_front()
+            except Exception:
+                pass
         job = _Job(account_id, account, context, page, time.monotonic() + (35 if background else 300),
                    status="checking" if restore else "logging_in", uid=(stored or {}).get("uid", ""), restore=restore,
                    background=background, session_saved=bool(existing_session), session_baseline=existing_session)
@@ -1273,7 +1287,10 @@ class AuthService:
                         self._set(account_id, evidence.status, evidence.message, last_checked=_now())
                         self._log(account_id, "login", evidence.status, evidence.message)
                         if evidence.status == "authenticated":
-                            self._dispose(account_id)
+                            if job.background:
+                                self._dispose(account_id)
+                            else:
+                                self._retain_visible(account_id)
                             continue
                     else:
                         self._set(account_id, evidence.status, evidence.message)
@@ -1302,7 +1319,11 @@ class AuthService:
                         self._fail(account_id, "后台检查超过时限；已保留原会话，稍后重试。")
                     elif job.status in {"authenticated", "session_received"}:
                         self._persist_verified(job)
-                        self._dispose(account_id)
+                        if self._jobs.get(account_id) is job:
+                            if job.background:
+                                self._dispose(account_id)
+                            else:
+                                self._retain_visible(account_id)
                     else:
                         self._fail(account_id, "登录等待超过 5 分钟，已停止任务；可重新登录。")
             except Exception as exc:
@@ -1374,8 +1395,29 @@ class AuthService:
         job = self._jobs.pop(account_id, None)
         with self._lock:
             self._screenshots.pop(account_id, None)
-        if job:
+            retained = self._visible_contexts.pop(account_id, None)
+        contexts = [item.context for item in (job, retained) if item]
+        for context in contexts:
             try:
-                job.context.close()
+                context.close()
             except Exception:
                 pass
+
+    def _retain_visible(self, account_id):
+        """Keep a completed Crown tab visible while releasing the worker job."""
+        job = self._jobs.pop(account_id, None)
+        if not job:
+            return
+        with self._lock:
+            self._screenshots.pop(account_id, None)
+            previous = self._visible_contexts.pop(account_id, None)
+            self._visible_contexts[account_id] = job
+        if previous and previous.context is not job.context:
+            try:
+                previous.context.close()
+            except Exception:
+                pass
+        try:
+            job.page.bring_to_front()
+        except Exception:
+            pass

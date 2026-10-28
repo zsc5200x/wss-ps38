@@ -1,5 +1,6 @@
 import unittest
 import os
+import threading
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -191,6 +192,58 @@ class CrownAccountTests(unittest.TestCase):
         self.assertEqual(chromium.connect_urls, ["http://127.0.0.1:9222"])
         self.assertEqual(chromium.launch_options, [])
         self.assertTrue(service._browser_shared)
+
+    def test_completed_login_keeps_visible_context_until_disposed(self):
+        class FakePage:
+            def __init__(self):
+                self.front_count = 0
+
+            def bring_to_front(self):
+                self.front_count += 1
+
+        class FakeContext:
+            def __init__(self):
+                self.close_count = 0
+
+            def close(self):
+                self.close_count += 1
+
+        context = FakeContext()
+        page = FakePage()
+        service = AuthService.__new__(AuthService)
+        service._jobs = {"account": SimpleNamespace(context=context, page=page)}
+        service._screenshots = {}
+        service._visible_contexts = {}
+        service._lock = threading.RLock()
+
+        service._retain_visible("account")
+
+        self.assertNotIn("account", service._jobs)
+        self.assertIn("account", service._visible_contexts)
+        self.assertEqual(context.close_count, 0)
+        self.assertEqual(page.front_count, 1)
+        self.assertTrue(service.browser_open("account"))
+
+        service._dispose("account")
+
+        self.assertEqual(context.close_count, 1)
+        self.assertFalse(service.browser_open("account"))
+
+    def test_background_check_does_not_replace_visible_context(self):
+        class FakeStore:
+            def get_account(self, account_id):
+                return {"id": account_id, "kind": "crown_odds", "enabled": True}
+
+        retained = object()
+        service = AuthService.__new__(AuthService)
+        service.store = FakeStore()
+        service._jobs = {}
+        service._visible_contexts = {"account": retained}
+
+        service._begin("account", background=True)
+
+        self.assertIs(service._visible_contexts["account"], retained)
+        self.assertEqual(service._jobs, {})
 
 
 if __name__ == "__main__":
