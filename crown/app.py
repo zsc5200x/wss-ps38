@@ -135,10 +135,15 @@ STATIC_ASSETS = {
 }
 
 
-def render_crown_html(*, embedded=False):
+def render_crown_html(*, embedded=False, fixtures=False):
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    classes = []
     if embedded:
-        return html.replace("<body>", '<body class="crown-embedded">', 1)
+        classes.append("crown-embedded")
+    if fixtures:
+        classes.append("crown-fixtures")
+    if classes:
+        return html.replace("<body>", f'<body class="{" ".join(classes)}">', 1)
     return html
 
 
@@ -213,7 +218,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/crown":
             embedded = str((query.get("embed") or ["0"])[0]).lower() in {"1", "true", "yes"}
-            body = render_crown_html(embedded=embedded).encode("utf-8")
+            fixtures = str((query.get("fixtures") or ["0"])[0]).lower() in {"1", "true", "yes"}
+            body = render_crown_html(embedded=embedded, fixtures=fixtures).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")

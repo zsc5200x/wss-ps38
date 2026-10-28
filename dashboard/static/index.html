@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#0a0f19">
   <title>赔率数据终端</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20261028-2005">
+  <link rel="stylesheet" href="/static/styles.css?v=20261029-0145">
 </head>
 <body>
   <div class="ambient ambient-a" aria-hidden="true"></div>
@@ -312,45 +312,15 @@
     </main>
     </div>
 
-    <section id="homePage" class="page-view integration-page panel hidden" data-page-panel="home" aria-labelledby="homePageTitle">
-      <div class="integration-page-head">
-        <div class="integration-title-group">
-          <span class="integration-mark home">H</span>
-          <div>
-            <div class="eyebrow">DATA WORKSPACE</div>
-            <h2 id="homePageTitle">数据工作台</h2>
-            <p>在一个工作台内切换平博与皇冠数据源，共用统一启动入口和顶部导航。</p>
-          </div>
-        </div>
-        <span class="integration-badge ready">数据源入口</span>
-      </div>
-
-      <div class="source-entry-grid">
-        <button class="source-entry" type="button" data-page-link="pinnacle">
-          <span class="source-entry-top">
-            <span class="source-entry-mark">P</span>
-            <span class="source-entry-state live"><span></span>实时数据</span>
-          </span>
-          <strong>平博数据</strong>
-          <p>PS3838 / Pinnacle 实时盘口、赔率变化与历史赔率。</p>
-          <span class="source-entry-action">进入平博看板 <span>→</span></span>
-        </button>
-
-        <button class="source-entry crown" type="button" data-page-link="crown">
-          <span class="source-entry-top">
-            <span class="source-entry-mark">C</span>
-            <span class="source-entry-state live"><span></span>已接入</span>
-          </span>
-          <strong>皇冠数据</strong>
-          <p>皇冠实时盘口、登录会话与赛事详情，直接在当前工作台内查看。</p>
-          <span class="source-entry-action">进入皇冠看板 <span>→</span></span>
-        </button>
-      </div>
-
-      <div class="home-workspace-note">
-        <span>统一入口</span>
-        <p>平博与皇冠保留各自独立的采集/登录运行时，在同一个看板和启动命令下协同工作。</p>
-      </div>
+    <section id="homePage" class="page-view crown-page hidden" data-page-panel="home" aria-label="皇冠赛事工作区">
+      <iframe
+        id="homeCrownFrame"
+        class="crown-frame"
+        title="皇冠赛事"
+        data-crown-frame
+        data-src="/crown?embed=1&fixtures=1"
+        loading="lazy"
+      ></iframe>
     </section>
 
     <section id="crownPage" class="page-view crown-page hidden" data-page-panel="crown" aria-label="皇冠实时数据看板">
@@ -358,6 +328,7 @@
         id="crownFrame"
         class="crown-frame"
         title="皇冠实时数据"
+        data-crown-frame
         data-src="/crown?embed=1"
         loading="lazy"
       ></iframe>
@@ -373,6 +344,6 @@
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/static/app.js?v=20261029-0055" defer></script>
+  <script src="/static/app.js?v=20261029-0145" defer></script>
 </body>
 </html>

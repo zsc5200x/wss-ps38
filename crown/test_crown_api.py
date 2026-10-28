@@ -70,6 +70,16 @@ class CrownApiTests(unittest.TestCase):
         self.assertEqual(headers["Content-Type"], "text/css; charset=utf-8")
         self.assertIn("body.crown-embedded .topbar", stylesheet)
 
+    def test_fixtures_mode_hides_duplicate_shell_chrome(self):
+        status, _headers, body = self.request("GET", "/crown?embed=1&fixtures=1")
+        self.assertEqual(status, 200)
+        self.assertIn('<body class="crown-embedded crown-fixtures">', body)
+
+        status, _headers, stylesheet = self.request("GET", "/crown/static/app.css")
+        self.assertEqual(status, 200)
+        self.assertIn("body.crown-fixtures .topbar-telemetry", stylesheet)
+        self.assertIn("body.crown-fixtures .workspace", stylesheet)
+
     def test_unknown_crown_static_asset_is_rejected(self):
         status, _headers, _body = self.request("GET", "/crown/static/../app.py")
         self.assertEqual(status, 404)

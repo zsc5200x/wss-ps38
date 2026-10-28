@@ -245,6 +245,12 @@ h1,h2,h3,p{margin:0}
 body.crown-embedded .ambient,body.crown-embedded .topbar{display:none}
 body.crown-embedded .app-shell{width:100%;min-height:100vh;padding:10px 12px 12px}
 body.crown-embedded .topbar-telemetry{margin-top:0}
+body.crown-fixtures{overflow:hidden}
+body.crown-fixtures .topbar-telemetry,
+body.crown-fixtures .metrics-grid,
+body.crown-fixtures .app-footer{display:none}
+body.crown-fixtures .app-shell{height:100vh;min-height:0;padding:8px}
+body.crown-fixtures .workspace{height:calc(100vh - 16px);min-height:0}
 @keyframes livePulse{0%,100%{opacity:1}50%{opacity:.55}}
 @media(max-width:1080px){
   .app-shell{width:min(100% - 24px,980px)}

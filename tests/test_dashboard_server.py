@@ -779,5 +779,27 @@ class DashboardStoreTests(unittest.TestCase):
         )
 
 
+class DashboardHomeUiTests(unittest.TestCase):
+    def test_home_embeds_crown_fixtures_without_placeholder_cards(self):
+        html = Path("dashboard/static/index.html").read_text(encoding="utf-8")
+        self.assertIn('data-src="/crown?embed=1&fixtures=1"', html)
+        for removed in (
+            "DATA WORKSPACE",
+            "数据工作台",
+            "数据源入口",
+            "进入平博看板",
+            "进入皇冠看板",
+            "统一入口",
+        ):
+            self.assertNotIn(removed, html)
+
+    def test_dashboard_manages_both_crown_frames(self):
+        script = Path("dashboard/static/app.js").read_text(encoding="utf-8")
+        self.assertIn('document.querySelectorAll("[data-crown-frame]")', script)
+        self.assertIn("function activeCrownFrame()", script)
+        self.assertIn("function syncCrownFrameActivity()", script)
+        self.assertIn("event.source === activeFrame?.contentWindow", script)
+
+
 if __name__ == "__main__":
     unittest.main()

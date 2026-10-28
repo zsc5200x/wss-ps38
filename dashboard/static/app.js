@@ -14,7 +14,7 @@
     pagePanels: [...document.querySelectorAll("[data-page-panel]")],
     pauseButton: $("pauseButton"),
     refreshButton: $("refreshButton"),
-    crownFrame: $("crownFrame"),
+    crownFrames: [...document.querySelectorAll("[data-crown-frame]")],
     metadataMaintenance: $("metadataMaintenance"),
     metadataCheckButton: $("metadataCheckButton"),
     metadataRepairButton: $("metadataRepairButton"),
@@ -665,24 +665,49 @@
     return ["home", "pinnacle", "crown"].includes(value) ? value : "home";
   }
 
-  function ensureCrownFrameLoaded() {
-    if (!dom.crownFrame || dom.crownFrame.dataset.loaded === "true") return;
-    const source = dom.crownFrame.dataset.src;
-    if (!source) return;
-    dom.crownFrame.dataset.loaded = "true";
-    dom.crownFrame.src = source;
+  function isCrownView(page = state.currentPage) {
+    return page === "home" || page === "crown";
   }
 
-  function postCrownCommand(command, payload = {}) {
-    if (!dom.crownFrame?.contentWindow) return;
-    dom.crownFrame.contentWindow.postMessage(
+  function activeCrownFrame() {
+    return dom.crownFrames.find((frame) => {
+      const panel = frame.closest("[data-page-panel]");
+      return panel?.dataset.pagePanel === state.currentPage;
+    }) || null;
+  }
+
+  function ensureCrownFrameLoaded(frame = activeCrownFrame()) {
+    if (!frame || frame.dataset.loaded === "true") return;
+    const source = frame.dataset.src;
+    if (!source) return;
+    frame.dataset.loaded = "true";
+    frame.src = source;
+  }
+
+  function postCrownCommandTo(frame, command, payload = {}) {
+    if (!frame?.contentWindow) return;
+    frame.contentWindow.postMessage(
       { type: "crown:command", command, ...payload },
       location.origin,
     );
   }
 
+  function postCrownCommand(command, payload = {}) {
+    postCrownCommandTo(activeCrownFrame(), command, payload);
+  }
+
+  function syncCrownFrameActivity() {
+    const activeFrame = activeCrownFrame();
+    for (const frame of dom.crownFrames) {
+      if (frame.dataset.loaded !== "true") continue;
+      postCrownCommandTo(frame, "set-paused", {
+        paused: frame !== activeFrame || state.crownPaused,
+      });
+    }
+  }
+
   function updateRefreshControls() {
-    const paused = state.currentPage === "crown" ? state.crownPaused : state.paused;
+    const paused = isCrownView() ? state.crownPaused : state.paused;
     dom.pauseButton.setAttribute("aria-pressed", String(paused));
     dom.pauseButton.setAttribute("aria-label", paused ? "继续自动刷新" : "暂停自动刷新");
     dom.pauseButton.querySelector("span").textContent = paused ? "继续刷新" : "暂停刷新";
@@ -690,8 +715,9 @@
 
   function showPage(page, updateLocation = true) {
     const target = resolvePage(page);
+    const crownView = isCrownView(target);
     state.currentPage = target;
-    document.body.classList.toggle("crown-mode", target === "crown");
+    document.body.classList.toggle("crown-mode", crownView);
     for (const button of dom.primaryNav.querySelectorAll("[data-page]")) {
       const active = button.dataset.page === target;
       button.classList.toggle("active", active);
@@ -704,15 +730,16 @@
     for (const panel of dom.pagePanels) {
       panel.classList.toggle("hidden", panel.dataset.pagePanel !== target);
     }
-    if (target === "crown") {
+    if (crownView) {
       ensureCrownFrameLoaded();
       renderCrownTelemetry();
     } else {
       setStatus(state.snapshot?.freshness || "no-data", state.paused);
     }
+    syncCrownFrameActivity();
     updateRefreshControls();
     document.title = target === "home"
-      ? "数据工作台"
+      ? "皇冠赛事"
       : (target === "pinnacle" ? "平博数据" : "皇冠数据");
     if (updateLocation) {
       const nextHash = target === "home" ? "" : `#${target}`;
@@ -729,7 +756,7 @@
   }
 
   function renderCrownTelemetry() {
-    if (state.currentPage !== "crown") return;
+    if (!isCrownView()) return;
     const kind = crownTelemetryKind();
     const labels = {
       live: "皇冠实时接收中",
@@ -748,7 +775,7 @@
   }
 
   function setStatus(freshness, paused = false) {
-    if (state.currentPage === "crown") {
+    if (isCrownView()) {
       renderCrownTelemetry();
       return;
     }
@@ -1793,11 +1820,6 @@
     if (button) showPage(button.dataset.page);
   });
 
-  document.addEventListener("click", (event) => {
-    const link = event.target.closest("[data-page-link]");
-    if (link) showPage(link.dataset.pageLink);
-  });
-
   window.addEventListener("hashchange", () => {
     showPage(resolvePage(location.hash.slice(1)), false);
   });
@@ -1815,7 +1837,7 @@
   });
 
   dom.pauseButton.addEventListener("click", () => {
-    if (state.currentPage === "crown") {
+    if (isCrownView()) {
       state.crownPaused = !state.crownPaused;
       postCrownCommand("set-paused", { paused: state.crownPaused });
       updateRefreshControls();
@@ -1830,7 +1852,7 @@
   });
 
   dom.refreshButton.addEventListener("click", () => {
-    if (state.currentPage === "crown") {
+    if (isCrownView()) {
       postCrownCommand("refresh");
       showToast("正在刷新皇冠数据");
       return;
@@ -1839,24 +1861,34 @@
   });
 
   window.addEventListener("message", (event) => {
-    if (event.origin !== location.origin || event.source !== dom.crownFrame?.contentWindow) return;
+    const fromCrownFrame = dom.crownFrames.some(
+      (frame) => frame.contentWindow === event.source,
+    );
+    if (event.origin !== location.origin || !fromCrownFrame) return;
     const data = event.data || {};
     if (data.type !== "crown:state") return;
-    state.crownPaused = Boolean(data.paused);
+    const activeFrame = activeCrownFrame();
+    if (event.source === activeFrame?.contentWindow) {
+      state.crownPaused = Boolean(data.paused);
+    }
     state.crownStatus = String(data.status || "检查中");
     state.crownError = data.error || null;
     state.crownCached = Boolean(data.cached);
     state.crownUpdatedAt = data.updatedAt || null;
     state.crownEventCount = Number(data.eventCount || 0);
-    if (state.currentPage === "crown") {
+    if (isCrownView()) {
       updateRefreshControls();
       renderCrownTelemetry();
     }
   });
 
-  dom.crownFrame?.addEventListener("load", () => {
-    postCrownCommand("set-paused", { paused: state.crownPaused });
-  });
+  for (const frame of dom.crownFrames) {
+    frame.addEventListener("load", () => {
+      postCrownCommandTo(frame, "set-paused", {
+        paused: frame !== activeCrownFrame() || state.crownPaused,
+      });
+    });
+  }
 
   dom.metadataCheckButton.addEventListener("click", () => {
     startMetadataSync(false);
