@@ -8,12 +8,21 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from http.cookiejar import Cookie, CookieJar, DefaultCookiePolicy
 from http.client import HTTPException
+from ipaddress import ip_address
 import re
+import ssl
 import threading
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
-from urllib.request import HTTPCookieProcessor, HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from urllib.request import (
+    HTTPCookieProcessor,
+    HTTPRedirectHandler,
+    HTTPSHandler,
+    ProxyHandler,
+    Request,
+    build_opener,
+)
 import xml.etree.ElementTree as ET
 
 
@@ -42,6 +51,23 @@ class MemberExpired(MemberError):
 
 class MemberSessionConflict(MemberError):
     """The provider rejected a valid-looking session because another login won."""
+
+
+def _allow_legacy_ip_certificate(account, origin):
+    """Allow expired certificates only for a Crown public-IP entry/handoff pair."""
+    if account.get("kind") != "crown_odds":
+        return False
+    for value in (account.get("base_url"), origin):
+        try:
+            parts = urlsplit(str(value or ""))
+            address = ip_address(parts.hostname or "")
+        except (TypeError, ValueError):
+            return False
+        if (parts.scheme.lower() != "https" or not parts.hostname
+                or parts.username is not None or parts.password is not None
+                or parts.port not in (None, 443) or not address.is_global):
+            return False
+    return True
 
 
 class _SameOriginCookies(DefaultCookiePolicy):
@@ -96,7 +122,14 @@ class CrownMemberClient:
         self.origin, self.uid, self.protocol = self._session_contract()
         self._cookies = CookieJar(policy=_SameOriginCookies(urlsplit(self.origin).hostname))
         self._restore_cookies()
-        self._opener = build_opener(ProxyHandler({}), _NoRedirects(), HTTPCookieProcessor(self._cookies))
+        handlers = [ProxyHandler({}), _NoRedirects()]
+        if _allow_legacy_ip_certificate(self.account, self.origin):
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            handlers.append(HTTPSHandler(context=context))
+        handlers.append(HTTPCookieProcessor(self._cookies))
+        self._opener = build_opener(*handlers)
 
     def _session_contract(self):
         session = self.session

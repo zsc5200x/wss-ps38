@@ -1,7 +1,10 @@
 import unittest
 from unittest.mock import patch
 
-from crown_local.backend.crown_member import MemberSessionConflict
+from crown_local.backend.crown_member import (
+    MemberSessionConflict,
+    _allow_legacy_ip_certificate,
+)
 from crown_local.backend.crown_odds import CrownOddsClient, OddsUnavailable, safe_failure
 from crown_runtime import _safe_reason
 
@@ -53,6 +56,19 @@ class CrownSessionErrorTests(unittest.TestCase):
             client.list_games("today")
 
         self.assertEqual(raised.exception.reason, "upstream_response_invalid")
+
+    def test_legacy_certificate_is_allowed_only_for_crown_public_ip_pair(self):
+        account = {"kind": "crown_odds", "base_url": "https://64.188.47.32"}
+        self.assertTrue(_allow_legacy_ip_certificate(account, "https://43.229.3.127"))
+        self.assertFalse(_allow_legacy_ip_certificate(account, "https://m321.mos077.com"))
+        self.assertFalse(_allow_legacy_ip_certificate(
+            {"kind": "crown_odds", "base_url": "https://entry.example.com"},
+            "https://43.229.3.127",
+        ))
+        self.assertFalse(_allow_legacy_ip_certificate(
+            {"kind": "crown_odds", "base_url": "https://64.188.47.32"},
+            "https://127.0.0.1",
+        ))
 
 
 if __name__ == "__main__":

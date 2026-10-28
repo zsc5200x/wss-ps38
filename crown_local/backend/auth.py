@@ -7,6 +7,7 @@ No captured credentials or fingerprint headers are replayed.
 from dataclasses import dataclass, field
 from copy import deepcopy
 from datetime import datetime, timezone
+from ipaddress import ip_address
 import json
 import os
 from pathlib import Path
@@ -29,6 +30,56 @@ def _now():
 def _origin(url):
     parts = urlsplit(url)
     return parts.scheme.lower(), (parts.hostname or "").lower(), parts.port or (443 if parts.scheme == "https" else 80)
+
+
+def _allow_insecure_certificate(account):
+    """Allow legacy Crown IP endpoints whose HTTPS certificate is invalid.
+
+    Several Crown deployments expose only an IP address and keep serving after
+    their certificate expires. The compatibility exception is deliberately
+    limited to Crown accounts using an IP literal; normal domains remain under
+    strict certificate validation.
+    """
+    if account.get("kind") != "crown_odds":
+        return False
+    parts = urlsplit(str(account.get("base_url") or ""))
+    if parts.scheme.lower() != "https" or not parts.hostname:
+        return False
+    try:
+        address = ip_address(parts.hostname)
+    except ValueError:
+        return False
+    return address.is_global
+
+
+def _crown_ip_redirect_origin(account, url):
+    """Return a safe Crown IP-to-IP redirect origin, or an empty string.
+
+    Some Crown entry IPs hand the browser to a different public IP before the
+    member login form is rendered. Only Crown accounts already configured with
+    a public HTTPS IP may adopt the first public HTTPS IP redirect. Domain
+    redirects continue to require the site's explicit member-domain handoff.
+    """
+    if account.get("kind") != "crown_odds":
+        return ""
+    try:
+        source = urlsplit(str(account.get("base_url") or ""))
+        target = urlsplit(str(url or ""))
+        if (source.scheme.lower() != "https" or target.scheme.lower() != "https"
+                or not source.hostname or not target.hostname
+                or target.username is not None or target.password is not None
+                or target.port not in (None, 443)):
+            return ""
+        source_ip = ip_address(source.hostname)
+        target_ip = ip_address(target.hostname)
+        if not source_ip.is_global or not target_ip.is_global:
+            return ""
+        if _origin(source.geturl()) == _origin(target.geturl()):
+            return ""
+    except (TypeError, ValueError):
+        return ""
+    hostname = f"[{target_ip.compressed}]" if target_ip.version == 6 else target_ip.compressed
+    return f"https://{hostname}"
 
 
 # These values are the member site's own login handoff context, retained only
@@ -96,6 +147,7 @@ class AuthService:
         self._stop = threading.Event()
         self._browser = None
         self._background_browser = None
+        self._browser_shared = False
         self._playwright = None
         self._destinations = {}
         self._thread = threading.Thread(target=self._run, name="account-login", daemon=True)
@@ -234,6 +286,28 @@ class AuthService:
             pass  # A deleted account must not terminate other browser sessions.
 
     def _launch(self, background=False):
+        cdp_url = os.environ.get("CROWN_CDP_URL", "").strip()
+        if cdp_url:
+            browser = self._browser
+            if browser and browser.is_connected():
+                return browser
+            try:
+                from playwright.sync_api import sync_playwright
+            except ImportError:
+                raise RuntimeError("缺少 Playwright，请安装项目依赖后重试。") from None
+            if self._playwright is None:
+                self._playwright = sync_playwright().start()
+            try:
+                browser = self._playwright.chromium.connect_over_cdp(cdp_url)
+            except Exception:
+                raise RuntimeError(
+                    "无法连接平博正在使用的 Chrome；请确认平博页面已打开且 CDP 可用。"
+                ) from None
+            self._browser = browser
+            self._background_browser = browser
+            self._browser_shared = True
+            return browser
+
         browser = self._background_browser if background else self._browser
         if browser and browser.is_connected():
             return browser
@@ -257,6 +331,7 @@ class AuthService:
                 self._background_browser = browser
             else:
                 self._browser = browser
+            self._browser_shared = False
             return browser
         except Exception:
             raise RuntimeError("浏览器启动失败，请运行 python -m playwright install chromium，或检查浏览器配置。") from None
@@ -290,8 +365,18 @@ class AuthService:
         finally:
             for account_id in list(self._jobs):
                 self._dispose(account_id)
+            closed = set()
             for browser in (self._browser, self._background_browser):
                 if not browser:
+                    continue
+                identity = id(browser)
+                if identity in closed:
+                    continue
+                closed.add(identity)
+                # A CDP browser belongs to the shared Pingbo process. Closing it
+                # here would also close the user's Pingbo tab; stopping Playwright
+                # below only disconnects Crown's control session.
+                if self._browser_shared:
                     continue
                 try:
                     browser.close()
@@ -328,7 +413,10 @@ class AuthService:
         if stored and account["kind"] == "crown_odds" and self._check_saved_member(check_account, stored):
             return
         browser = self._launch(background=background)
-        context_args = {"viewport": {"width": 1100, "height": 800}, "ignore_https_errors": False}
+        context_args = {
+            "viewport": {"width": 1100, "height": 800},
+            "ignore_https_errors": _allow_insecure_certificate(account),
+        }
         if stored:
             context_args["storage_state"] = stored.get("storage_state", {"cookies": [], "origins": []})
         context = browser.new_context(**context_args)
@@ -475,6 +563,12 @@ class AuthService:
         try:
             if (self._jobs.get(job.account_id) is job and self._is_current(job)
                     and job.account["kind"] == "crown_odds" and frame == job.page.main_frame):
+                if not job.member_origin:
+                    candidate = _crown_ip_redirect_origin(job.account, frame.url)
+                    if candidate:
+                        from .storage import validate_target_url
+                        if validate_target_url(candidate + "/"):
+                            job.member_origin = candidate
                 self._capture_member_resume(job, frame.url)
         except Exception:
             # A replaced frame or malformed location cannot change saved state.
@@ -589,7 +683,7 @@ class AuthService:
         request = route.request
         data = request.post_data or ""
         if (job.account["kind"] != "crown_odds" or not self._is_current(job)
-                or _origin(request.url) != _origin(job.account["base_url"])
+                or not self._trusted_page(job, request.url)
                 or request.method != "POST" or urlsplit(request.url).path != "/transform_nl.php"
                 or parse_qs(data, keep_blank_values=True).get("p") not in
                 (["chk_login"], ["check_login_domain"])):
@@ -704,7 +798,7 @@ class AuthService:
             'input[type="password"]:not([name="safe"]):not([name="pwd_safe"])',
         ]
         for frame in job.page.frames:
-            if _origin(frame.url) != _origin(job.account["base_url"]):
+            if not self._trusted_page(job, frame.url):
                 continue
             # Layer selection may replace the form or reveal another panel.
             # Resolve the currently visible fields after the site's own switch.
@@ -793,7 +887,8 @@ class AuthService:
 
     def _response(self, job, response):
         try:
-            if self._jobs.get(job.account_id) is not job or not self._is_current(job) or _origin(response.url) != _origin(job.account["base_url"]):
+            if (self._jobs.get(job.account_id) is not job or not self._is_current(job)
+                    or not self._trusted_page(job, response.url)):
                 return
             request = response.request
             from .providers import is_login_response

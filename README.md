@@ -39,12 +39,20 @@ test_crown_odds_display.py     皇冠赔率和附加盘测试
 
 项目要求 Python 3.11 或更高版本。
 
+通过项目根目录的 `./start.sh` 或 `./crown.sh` 启动时，皇冠会连接平博正在使用的 Chrome CDP（默认 `http://127.0.0.1:9222`）。两种数据源共用一个 Chrome 进程，但皇冠使用独立的无痕浏览上下文，因此不会混用或导出平博 Cookie。直接运行 `app.py` 且未设置 `CROWN_CDP_URL` 时，才会回退为皇冠独立浏览器。
+
 ```bash
 cd /Users/zsc5200x/ps3838-wss/crown
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 .venv/bin/python -m playwright install chromium
 .venv/bin/python app.py
+```
+
+如手动指定共享浏览器：
+
+```bash
+CROWN_CDP_URL=http://127.0.0.1:9222 .venv/bin/python app.py
 ```
 
 启动后访问：

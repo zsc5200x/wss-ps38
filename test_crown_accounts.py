@@ -1,7 +1,14 @@
 import unittest
+import os
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import crown_runtime
+from crown_local.backend.auth import (
+    AuthService,
+    _allow_insecure_certificate,
+    _crown_ip_redirect_origin,
+)
 
 
 class CrownAccountTests(unittest.TestCase):
@@ -108,6 +115,82 @@ class CrownAccountTests(unittest.TestCase):
         self.assertEqual(fake_store.deleted, "existing-account")
         self.assertIsNone(result)
         self.assertEqual(fake_store.accounts(), [])
+
+    def test_crown_ip_endpoint_allows_legacy_certificate(self):
+        self.assertTrue(_allow_insecure_certificate({
+            "kind": "crown_odds", "base_url": "https://64.188.47.32",
+        }))
+
+    def test_crown_domain_keeps_strict_certificate_validation(self):
+        self.assertFalse(_allow_insecure_certificate({
+            "kind": "crown_odds", "base_url": "https://example.com",
+        }))
+
+    def test_crown_private_ip_keeps_strict_certificate_validation(self):
+        self.assertFalse(_allow_insecure_certificate({
+            "kind": "crown_odds", "base_url": "https://127.0.0.1",
+        }))
+
+    def test_crown_public_ip_entry_can_adopt_public_ip_redirect(self):
+        self.assertEqual(
+            _crown_ip_redirect_origin(
+                {"kind": "crown_odds", "base_url": "https://64.188.47.32"},
+                "https://43.229.3.127/login?from=entry",
+            ),
+            "https://43.229.3.127",
+        )
+
+    def test_crown_redirect_does_not_adopt_private_or_domain_targets(self):
+        account = {"kind": "crown_odds", "base_url": "https://64.188.47.32"}
+        self.assertEqual(_crown_ip_redirect_origin(account, "https://127.0.0.1/"), "")
+        self.assertEqual(_crown_ip_redirect_origin(account, "https://example.com/"), "")
+        self.assertEqual(
+            _crown_ip_redirect_origin(
+                {"kind": "crown_odds", "base_url": "https://entry.example.com"},
+                "https://43.229.3.127/",
+            ),
+            "",
+        )
+
+    def test_adopted_crown_ip_redirect_is_a_trusted_page_origin(self):
+        job = SimpleNamespace(
+            account={"kind": "crown_odds", "base_url": "https://64.188.47.32"},
+            member_origin="https://43.229.3.127",
+        )
+        self.assertTrue(AuthService._trusted_page(job, "https://43.229.3.127/login"))
+
+    def test_crown_launches_through_shared_cdp_browser(self):
+        class FakeBrowser:
+            def is_connected(self):
+                return True
+
+        class FakeChromium:
+            def __init__(self):
+                self.connect_urls = []
+                self.launch_options = []
+
+            def connect_over_cdp(self, url):
+                self.connect_urls.append(url)
+                return FakeBrowser()
+
+            def launch(self, **options):
+                self.launch_options.append(options)
+                return FakeBrowser()
+
+        chromium = FakeChromium()
+        service = AuthService.__new__(AuthService)
+        service._browser = None
+        service._background_browser = None
+        service._browser_shared = False
+        service._playwright = SimpleNamespace(chromium=chromium)
+
+        with patch.dict(os.environ, {"CROWN_CDP_URL": "http://127.0.0.1:9222"}):
+            browser = service._launch()
+
+        self.assertIsNotNone(browser)
+        self.assertEqual(chromium.connect_urls, ["http://127.0.0.1:9222"])
+        self.assertEqual(chromium.launch_options, [])
+        self.assertTrue(service._browser_shared)
 
 
 if __name__ == "__main__":
