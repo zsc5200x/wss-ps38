@@ -27,27 +27,33 @@ DEFAULTS: Dict[str, Any] = {
     "backup_keep": 7,
     "capture_compress_after_hours": 24,
     "capture_compress_min_mb": 16,
+    "presence_interval_seconds": 5,
     "snapshot_interval_seconds": 2,
     "capture_rotation_mb": 0,
 }
 
 
-def load_config() -> Dict[str, Any]:
-    """Load config.json when present and merge it over project defaults."""
-    config = dict(DEFAULTS)
-    config_path = Path(
+def config_path() -> Path:
+    """Return the active configuration file path."""
+    return Path(
         os.environ.get("PS3838_CONFIG", str(DEFAULT_CONFIG_PATH))
     ).expanduser()
 
-    if config_path.exists():
+
+def load_config() -> Dict[str, Any]:
+    """Load config.json when present and merge it over project defaults."""
+    config = dict(DEFAULTS)
+    active_path = config_path()
+
+    if active_path.exists():
         try:
-            with config_path.open(encoding="utf-8") as handle:
+            with active_path.open(encoding="utf-8") as handle:
                 loaded = json.load(handle)
             if not isinstance(loaded, dict):
                 raise ValueError("顶层必须是 JSON 对象")
             config.update(loaded)
         except (OSError, ValueError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"无法读取配置文件 {config_path}: {exc}") from exc
+            raise RuntimeError(f"无法读取配置文件 {active_path}: {exc}") from exc
 
     return config
 

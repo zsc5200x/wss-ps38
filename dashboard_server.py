@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import http.client
 import json
 import mimetypes
 import os
 import queue
 import signal
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -29,8 +31,18 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from crown_proxy import is_crown_path, proxy_crown
+from fixture_merge import (
+    FixtureMergeStore,
+    MappingConflict,
+    prepare_crown_event,
+    prepare_pinnacle_event,
+    rank_candidates,
+    rank_league_candidates,
+    summarize_leagues,
+)
+from maintenance import backup_database, verify_database
 from odds_utils import normalize_odds
-from project_config import get_path, load_config
+from project_config import DEFAULTS, config_path, get_path, load_config
 
 
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -54,9 +66,252 @@ MARKET_ROW_MISSES = 4
 MARKET_ROW_STALE_MISSES = 2
 MARKET_ROW_STALE_AFTER_SECONDS = 20 * 60
 
+SETTINGS_SCHEMA: Dict[str, Dict[str, Any]] = {
+    "presence_interval_seconds": {
+        "label": "赛事存在性检查间隔",
+        "type": "number",
+        "unit": "秒",
+        "min": 5,
+        "max": 60,
+        "step": 1,
+        "default": 5,
+        "restartRequired": True,
+        "service": "采集器",
+    },
+    "snapshot_interval_seconds": {
+        "label": "实时快照处理间隔",
+        "type": "number",
+        "unit": "秒",
+        "min": 0.1,
+        "max": 10,
+        "step": 0.1,
+        "default": 2,
+        "restartRequired": True,
+        "service": "快照进程",
+    },
+    "capture_rotation_mb": {
+        "label": "原始采集文件轮转大小",
+        "type": "integer",
+        "unit": "MB",
+        "options": [0, 128, 256, 512, 1024],
+        "default": 0,
+        "restartRequired": True,
+        "service": "采集器",
+    },
+    "capture_compress_after_hours": {
+        "label": "旧采集文件压缩等待时间",
+        "type": "number",
+        "unit": "小时",
+        "min": 0,
+        "max": 720,
+        "step": 1,
+        "default": 24,
+        "restartRequired": False,
+        "service": "维护任务",
+    },
+    "capture_compress_min_mb": {
+        "label": "触发压缩的最小文件",
+        "type": "number",
+        "unit": "MB",
+        "min": 1,
+        "max": 1024,
+        "step": 1,
+        "default": 16,
+        "restartRequired": False,
+        "service": "维护任务",
+    },
+    "backup_keep": {
+        "label": "数据库备份保留数量",
+        "type": "integer",
+        "unit": "份",
+        "min": 1,
+        "max": 30,
+        "step": 1,
+        "default": 7,
+        "restartRequired": False,
+        "service": "维护任务",
+    },
+}
+SETTINGS_EDITABLE_FIELDS = frozenset(SETTINGS_SCHEMA)
+SETTINGS_RESTART_FIELDS = frozenset(
+    key for key, item in SETTINGS_SCHEMA.items() if item.get("restartRequired")
+)
+
 
 def now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="milliseconds")
+
+
+def _coerce_setting_value(key: str, value: Any) -> Any:
+    """Validate and normalize one user-editable setting."""
+    schema = SETTINGS_SCHEMA.get(key)
+    if schema is None:
+        raise ValueError(f"不允许修改配置项：{key}")
+    if isinstance(value, bool):
+        raise ValueError(f"配置项 {key} 必须是数字")
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"配置项 {key} 必须是数字") from exc
+    if not number == number or number in (float("inf"), float("-inf")):
+        raise ValueError(f"配置项 {key} 数值无效")
+
+    options = schema.get("options")
+    if options is not None:
+        if not number.is_integer() or int(number) not in options:
+            choices = "、".join(str(item) for item in options)
+            raise ValueError(f"配置项 {key} 只能是：{choices}")
+        return int(number)
+
+    minimum = float(schema["min"])
+    maximum = float(schema["max"])
+    if number < minimum or number > maximum:
+        raise ValueError(
+            f"配置项 {key} 必须在 {schema['min']} 到 {schema['max']} 之间"
+        )
+    if schema.get("type") == "integer":
+        if not number.is_integer():
+            raise ValueError(f"配置项 {key} 必须是整数")
+        return int(number)
+    return int(number) if number.is_integer() else number
+
+
+def _write_settings_file(updates: Dict[str, Any]) -> Dict[str, Any]:
+    """Persist a small allow-listed config patch with an atomic replace."""
+    active_path = config_path()
+    active_path.parent.mkdir(parents=True, exist_ok=True)
+    current: Dict[str, Any] = {}
+    if active_path.exists():
+        try:
+            loaded = json.loads(active_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"无法读取现有配置：{exc}") from exc
+        if not isinstance(loaded, dict):
+            raise RuntimeError("现有配置文件顶层必须是 JSON 对象")
+        current = loaded
+
+    changed = {
+        key: value for key, value in updates.items() if current.get(key) != value
+    }
+    if not changed:
+        return {"changed": {}, "backupPath": None, "path": str(active_path)}
+
+    backup_path: Optional[Path] = None
+    if active_path.exists():
+        backup_dir = PROJECT_DIR / ".run" / "config-backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
+        backup_path = backup_dir / f"config-{stamp}.json"
+        backup_path.write_text(
+            json.dumps(current, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    merged = dict(current)
+    merged.update(changed)
+    temporary = active_path.with_name(
+        f".{active_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    try:
+        temporary.write_text(
+            json.dumps(merged, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, active_path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return {
+        "changed": changed,
+        "backupPath": str(backup_path) if backup_path else None,
+        "path": str(active_path),
+    }
+
+
+def _settings_payload(
+    config: Dict[str, Any],
+    store: "OddsStore",
+    metadata_runner: "MetadataSyncRunner",
+) -> Dict[str, Any]:
+    snapshot = store.snapshot()
+    source = snapshot.get("source") or {}
+    database_path = get_path(config, "dashboard_db_path")
+    capture_path = get_path(config, "capture_path")
+    backup_dir = get_path(config, "backup_dir")
+    try:
+        backup_count = len(
+            [path for path in backup_dir.glob("odds_history-*.sqlite3") if path.is_file()]
+        )
+    except OSError:
+        backup_count = 0
+    try:
+        disk = shutil.disk_usage(PROJECT_DIR)
+        disk_payload = {
+            "totalBytes": disk.total,
+            "freeBytes": disk.free,
+            "usedBytes": disk.used,
+        }
+    except OSError:
+        disk_payload = {"totalBytes": None, "freeBytes": None, "usedBytes": None}
+    metadata_raw = metadata_runner.status()
+    metadata = {
+        key: metadata_raw.get(key)
+        for key in (
+            "running",
+            "startedAt",
+            "finishedAt",
+            "processed",
+            "resolved",
+            "failed",
+            "updated",
+            "message",
+            "logPath",
+            "processExitCode",
+            "apply",
+            "current",
+        )
+        if key in metadata_raw
+    }
+    effective = {key: config.get(key, DEFAULTS.get(key)) for key in SETTINGS_SCHEMA}
+    readonly = {
+        "cdp_url": config.get("cdp_url"),
+        "chrome_binary": config.get("chrome_binary"),
+        "chrome_profile_dir": config.get("chrome_profile_dir"),
+        "start_url": config.get("start_url"),
+        "target_hosts": config.get("target_hosts"),
+        "capture_path": str(capture_path),
+        "events_file": str(get_path(config, "events_file")),
+        "live_snapshot_file": str(get_path(config, "live_snapshot_file")),
+        "dashboard_db_path": str(database_path),
+        "backup_dir": str(backup_dir),
+    }
+    return {
+        "ok": True,
+        "configPath": str(config_path()),
+        "effective": effective,
+        "defaults": {
+            key: schema.get("default", DEFAULTS.get(key))
+            for key, schema in SETTINGS_SCHEMA.items()
+        },
+        "schema": SETTINGS_SCHEMA,
+        "restartRequired": sorted(SETTINGS_RESTART_FIELDS),
+        "readonly": readonly,
+        "status": {
+            "freshness": snapshot.get("freshness"),
+            "lagSeconds": snapshot.get("lagSeconds"),
+            "serverTime": snapshot.get("serverTime"),
+            "lastCapturedAt": source.get("lastCapturedAt"),
+            "lastChangeAt": source.get("lastChangeAt"),
+            "databaseBytes": source.get("databaseBytes"),
+            "captureBytes": source.get("captureBytes"),
+            "persistedPoints": source.get("persistedPoints"),
+            "databaseQueued": source.get("databaseQueued"),
+            "databaseDropped": source.get("databaseDropped"),
+            "databaseErrors": source.get("databaseErrors"),
+            "backupCount": backup_count,
+            "metadata": metadata,
+            "disk": disk_payload,
+        },
+    }
 
 
 def as_text(value: Any) -> str:
@@ -1852,6 +2107,37 @@ class OddsStore:
                 "changes": changes,
             }
 
+    def event_details(self, event_id: str) -> Optional[Dict[str, Any]]:
+        """Return one Pinnacle event and its current full-time market rows.
+
+        The regular snapshot intentionally filters out stale or incomplete
+        events.  Confirmed merge mappings still need a direct lookup so the
+        homepage can keep showing the provider pair while a feed is catching
+        up, therefore this method reads the in-memory event by ID without
+        applying the dashboard visibility filter.
+        """
+        key = str(event_id or "").strip()
+        if not key:
+            return None
+        with self.lock:
+            event = self.events.get(key)
+            if event is None:
+                event = self.history_db.get_event(key)
+            if event is None:
+                return None
+            rows = sorted(
+                (
+                    self.serialize_row(key, row)
+                    for row in self.odds_by_event.get(key, {}).values()
+                    if is_full_time_market(row.get("stage"), row.get("market"))
+                ),
+                key=lambda row: (
+                    row.get("market", ""), row.get("stage", ""),
+                    row.get("option", ""), row.get("line", ""),
+                ),
+            )
+            return {"event": {**event}, "odds": rows}
+
 
 class CaptureTailer(threading.Thread):
     def __init__(self, store: OddsStore):
@@ -2041,6 +2327,366 @@ class MetadataSyncRunner:
 class DashboardHandler(BaseHTTPRequestHandler):
     store: OddsStore
     metadata_runner: MetadataSyncRunner
+    merge_store: FixtureMergeStore
+    config: Dict[str, Any]
+    config_lock = threading.RLock()
+
+    def _settings_response(self) -> Dict[str, Any]:
+        with self.config_lock:
+            return _settings_payload(self.config, self.store, self.metadata_runner)
+
+    def _update_settings(self) -> None:
+        try:
+            payload = self.read_json_body()
+        except ValueError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=400)
+            return
+        unknown = sorted(set(payload) - SETTINGS_EDITABLE_FIELDS)
+        if unknown:
+            self.send_json(
+                {"ok": False, "error": f"不允许修改配置项：{'、'.join(unknown)}"},
+                status=400,
+            )
+            return
+        if not payload:
+            self.send_json({"ok": False, "error": "请求中没有可保存的配置项"}, status=400)
+            return
+        try:
+            updates = {
+                key: _coerce_setting_value(key, value)
+                for key, value in payload.items()
+            }
+        except ValueError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=400)
+            return
+        with self.config_lock:
+            try:
+                result = _write_settings_file(updates)
+            except (OSError, RuntimeError) as exc:
+                self.send_json({"ok": False, "error": f"配置保存失败：{exc}"}, status=500)
+                return
+            self.config.update(updates)
+            response = self._settings_response()
+        response.update(
+            {
+                "changed": result["changed"],
+                "backupPath": result["backupPath"],
+                "restartRequired": sorted(
+                    set(result["changed"]) & SETTINGS_RESTART_FIELDS
+                ),
+                "message": (
+                    "配置已保存，部分设置需要重启对应服务"
+                    if set(result["changed"]) & SETTINGS_RESTART_FIELDS
+                    else "配置已保存"
+                ),
+            }
+        )
+        self.send_json(response)
+
+    def _backup_database(self) -> None:
+        with self.config_lock:
+            try:
+                result = backup_database(self.config)
+            except (OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
+                self.send_json({"ok": False, "error": f"数据库备份失败：{exc}"}, status=500)
+                return
+        self.send_json({"ok": True, "message": "数据库备份完成", "backup": result})
+
+    def _check_database_integrity(self) -> None:
+        with self.config_lock:
+            path = get_path(self.config, "dashboard_db_path")
+        try:
+            result = verify_database(path)
+        except (OSError, RuntimeError, sqlite3.Error) as exc:
+            self.send_json(
+                {"ok": False, "databasePath": str(path), "error": f"数据库检查失败：{exc}"},
+                status=500,
+            )
+            return
+        self.send_json(
+            {"ok": True, "databasePath": str(path), "result": result, "message": "SQLite 完整性正常"}
+        )
+
+    def _crown_fixture_events(self) -> tuple[list[Dict[str, Any]], Optional[str]]:
+        connection = http.client.HTTPConnection("127.0.0.1", 8887, timeout=4)
+        try:
+            connection.request("GET", "/api/crown/events?compact=1")
+            response = connection.getresponse()
+            body = response.read(4 * 1024 * 1024 + 1)
+            if response.status != 200 or len(body) > 4 * 1024 * 1024:
+                return [], "皇冠赛事数据暂不可用，请检查皇冠服务。"
+            payload = json.loads(body.decode("utf-8"))
+            events = payload.get("events") if isinstance(payload, dict) else None
+            if not isinstance(events, list):
+                return [], "皇冠赛事数据格式暂不可用。"
+            return events, None
+        except (OSError, http.client.HTTPException, UnicodeDecodeError, json.JSONDecodeError):
+            return [], "皇冠服务暂不可用；请确认皇冠数据已连接后重试。"
+        finally:
+            connection.close()
+
+    def _merge_event_lists(self) -> tuple[list[Dict[str, Any]], list[Dict[str, Any]], Optional[str]]:
+        source_pinnacle = self.store.snapshot().get("events") or []
+        source_crown, crown_error = self._crown_fixture_events()
+        pinnacle_events = [
+            prepare_pinnacle_event(event)
+            for event in source_pinnacle
+            if isinstance(event, dict)
+        ]
+        crown_events = [
+            prepare_crown_event(event)
+            for event in source_crown
+            if isinstance(event, dict)
+        ]
+        return pinnacle_events, crown_events, crown_error
+
+    def _merge_payload(self) -> Dict[str, Any]:
+        pinnacle_events, crown_events, crown_error = self._merge_event_lists()
+        mappings = self.merge_store.list_mappings()
+        league_mappings = self.merge_store.list_league_mappings()
+        mapped_pinnacle = {item.get("pinnacleId") for item in mappings}
+        mapped_crown = {item.get("crownId") for item in mappings}
+        league_mapping_by_crown = {
+            str(item.get("crownId") or ""): str(item.get("pinnacleId") or "")
+            for item in league_mappings
+        }
+        mapped_pinnacle_leagues = {
+            str(item.get("pinnacleId") or "") for item in league_mappings
+        }
+        mapped_crown_leagues = set(league_mapping_by_crown)
+        pinnacle_leagues = summarize_leagues(pinnacle_events)
+        crown_leagues = summarize_leagues(crown_events)
+        league_suggestion_map = rank_league_candidates(
+            pinnacle_events, crown_events, limit=5
+        )
+        league_suggestions = [
+            candidate
+            for crown_id, candidates in league_suggestion_map.items()
+            if crown_id not in mapped_crown_leagues
+            for candidate in candidates
+            if candidate.get("pinnacleLeagueId") not in mapped_pinnacle_leagues
+        ]
+        pinnacle_by_id = {str(event.get("id") or ""): event for event in pinnacle_events}
+        crown_by_id = {str(event.get("id") or ""): event for event in crown_events}
+        suggestion_map = rank_candidates(pinnacle_events, crown_events, limit=5)
+        suggestions = []
+        for pinnacle_id, candidates in suggestion_map.items():
+            if pinnacle_id in mapped_pinnacle:
+                continue
+            pinnacle_event = pinnacle_by_id.get(pinnacle_id) or {}
+            for candidate in candidates:
+                crown_id = str(candidate.get("crownId") or "")
+                if crown_id in mapped_crown:
+                    continue
+                crown_event = crown_by_id.get(crown_id) or {}
+                if league_mapping_by_crown.get(str(crown_event.get("leagueId") or "")) != str(
+                    pinnacle_event.get("leagueId") or ""
+                ):
+                    continue
+                suggestions.append({"pinnacleId": pinnacle_id, **candidate})
+        return {
+            "ok": True,
+            "updatedAt": now_iso(),
+            "pinnacleEvents": pinnacle_events,
+            "crownEvents": crown_events,
+            "pinnacleLeagues": pinnacle_leagues,
+            "crownLeagues": crown_leagues,
+            "leagueMappings": league_mappings,
+            "leagueSuggestions": league_suggestions,
+            "mappings": mappings,
+            "suggestions": suggestions,
+            "crownError": crown_error,
+        }
+
+    def _merge_confirmed_payload(self, query: Dict[str, list[str]]) -> Dict[str, Any]:
+        """Build the homepage data for manually confirmed fixture links.
+
+        Provider IDs are scoped to their own feed.  This endpoint therefore
+        joins only through ``fixture_mappings`` and never attempts to infer a
+        match from names or IDs.  Crown supplies the display name and markets;
+        Pinnacle contributes its current full-time rows for the same confirmed
+        fixture.
+        """
+        requested_crown = as_text((query.get("crownId") or [""])[0])
+        requested_pinnacle = as_text((query.get("pinnacleId") or [""])[0])
+        if len(requested_crown) > 128 or len(requested_pinnacle) > 128:
+            return {"ok": False, "error": "赛事 ID 参数过长。"}
+
+        crown_events, crown_error = self._crown_fixture_events()
+        crown_by_id = {
+            as_text(item.get("id")): item
+            for item in crown_events
+            if isinstance(item, dict) and as_text(item.get("id"))
+        }
+        mappings = self.merge_store.list_mappings()
+        items: list[Dict[str, Any]] = []
+        for mapping in mappings:
+            pinnacle_id = as_text(mapping.get("pinnacleId"))
+            crown_id = as_text(mapping.get("crownId"))
+            if requested_crown and crown_id != requested_crown:
+                continue
+            if requested_pinnacle and pinnacle_id != requested_pinnacle:
+                continue
+
+            raw_crown = crown_by_id.get(crown_id)
+            crown_snapshot = mapping.get("crownSnapshot")
+            if not isinstance(crown_snapshot, dict):
+                crown_snapshot = {}
+            if isinstance(raw_crown, dict):
+                crown_event = {
+                    **prepare_crown_event(raw_crown),
+                    "markets": raw_crown.get("markets") or {},
+                    "extra_markets": raw_crown.get("extra_markets") or {},
+                    "oddsFormat": raw_crown.get("odds_format") or raw_crown.get("oddsFormat") or "HK",
+                    "oddsFormatLabel": raw_crown.get("odds_format_label") or raw_crown.get("oddsFormatLabel") or "皇冠港赔（HK）",
+                }
+            else:
+                # Keep the last confirmed snapshot available while Crown is
+                # temporarily offline; current markets are simply empty.
+                crown_event = {
+                    **crown_snapshot,
+                    "id": crown_id or as_text(crown_snapshot.get("id")),
+                    "leagueId": as_text(crown_snapshot.get("leagueId") or crown_snapshot.get("league_id")),
+                    "markets": crown_snapshot.get("markets") or {},
+                    "extra_markets": crown_snapshot.get("extra_markets") or {},
+                }
+
+            pinnacle_details = self.store.event_details(pinnacle_id)
+            pinnacle_snapshot = mapping.get("pinnacleSnapshot")
+            if not isinstance(pinnacle_snapshot, dict):
+                pinnacle_snapshot = {}
+            if pinnacle_details is None:
+                pinnacle_event = {
+                    **pinnacle_snapshot,
+                    "id": pinnacle_id or as_text(pinnacle_snapshot.get("id")),
+                }
+                pinnacle_odds: list[Dict[str, Any]] = []
+            else:
+                pinnacle_event = prepare_pinnacle_event(pinnacle_details["event"])
+                pinnacle_odds = pinnacle_details["odds"]
+
+            items.append({
+                "confirmed": True,
+                "pinnacleId": pinnacle_id,
+                "crownId": crown_id,
+                "updatedAt": mapping.get("updatedAt") or mapping.get("updated_at"),
+                "pinnacle": {**pinnacle_event, "odds": pinnacle_odds},
+                "crown": crown_event,
+                "pinnacleEvent": {**pinnacle_event, "odds": pinnacle_odds},
+                "crownEvent": crown_event,
+            })
+
+        return {
+            "ok": True,
+            "updatedAt": now_iso(),
+            "items": items,
+            "count": len(items),
+            "crownError": crown_error,
+        }
+
+    def _handle_merge_league_mapping(self) -> None:
+        try:
+            payload = self.read_json_body()
+        except ValueError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=400)
+            return
+
+        action = as_text(payload.get("action"))
+        crown_id = as_text(payload.get("crownLeagueId"))
+        if not crown_id or len(crown_id) > 128:
+            self.send_json({"ok": False, "error": "皇冠联赛 ID 无效。"}, status=400)
+            return
+        if action == "unmap":
+            try:
+                self.merge_store.unmap_league(crown_id)
+            except MappingConflict as exc:
+                self.send_json({"ok": False, "error": str(exc)}, status=409)
+                return
+            self.send_json({
+                "ok": True,
+                "leagueMappings": self.merge_store.list_league_mappings(),
+            })
+            return
+        if action != "map":
+            self.send_json({"ok": False, "error": "不支持的联赛关联操作。"}, status=400)
+            return
+
+        pinnacle_id = as_text(payload.get("pinnacleLeagueId"))
+        if not pinnacle_id or len(pinnacle_id) > 128:
+            self.send_json({"ok": False, "error": "平博联赛 ID 无效。"}, status=400)
+            return
+        pinnacle_events, crown_events, crown_error = self._merge_event_lists()
+        if crown_error:
+            self.send_json({"ok": False, "error": crown_error}, status=503)
+            return
+        pinnacle_league = next(
+            (item for item in summarize_leagues(pinnacle_events)
+             if item["id"] == pinnacle_id),
+            None,
+        )
+        crown_league = next(
+            (item for item in summarize_leagues(crown_events)
+             if item["id"] == crown_id),
+            None,
+        )
+        if pinnacle_league is None or crown_league is None:
+            self.send_json(
+                {"ok": False, "error": "联赛列表已更新，请刷新后重新选择。"},
+                status=409,
+            )
+            return
+        try:
+            self.merge_store.map_leagues(pinnacle_league, crown_league)
+        except MappingConflict as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=409)
+            return
+        self.send_json({
+            "ok": True,
+            "leagueMappings": self.merge_store.list_league_mappings(),
+        })
+
+    def _handle_merge_mapping(self) -> None:
+        try:
+            payload = self.read_json_body()
+        except ValueError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=400)
+            return
+
+        action = as_text(payload.get("action"))
+        pinnacle_id = as_text(payload.get("pinnacleId"))
+        if not pinnacle_id or len(pinnacle_id) > 128:
+            self.send_json({"ok": False, "error": "平博赛事 ID 无效。"}, status=400)
+            return
+        if action == "unmap":
+            self.merge_store.unmap(pinnacle_id)
+            self.send_json({"ok": True, "mappings": self.merge_store.list_mappings()})
+            return
+        if action != "map":
+            self.send_json({"ok": False, "error": "不支持的合并操作。"}, status=400)
+            return
+
+        crown_id = as_text(payload.get("crownId"))
+        if not crown_id or len(crown_id) > 128:
+            self.send_json({"ok": False, "error": "皇冠赛事 ID 无效。"}, status=400)
+            return
+        pinnacle_events, crown_events, crown_error = self._merge_event_lists()
+        if crown_error:
+            self.send_json({"ok": False, "error": crown_error}, status=503)
+            return
+        pinnacle_event = next((event for event in pinnacle_events if as_text(event.get("id")) == pinnacle_id), None)
+        crown_event = next((event for event in crown_events if as_text(event.get("id")) == crown_id), None)
+        if pinnacle_event is None or crown_event is None:
+            self.send_json(
+                {"ok": False, "error": "赛事列表已更新，请刷新后重新选择。"},
+                status=409,
+            )
+            return
+        try:
+            self.merge_store.map_events(pinnacle_event, crown_event)
+        except MappingConflict as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=409)
+            return
+        self.send_json({"ok": True, "mappings": self.merge_store.list_mappings()})
 
     def log_message(self, fmt: str, *args: Any) -> None:
         if args and str(args[1]).startswith("4"):
@@ -2052,6 +2698,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
             proxy_crown(self, "GET")
             return
         query = parse_qs(parsed.query, keep_blank_values=True)
+        if parsed.path == "/api/settings":
+            try:
+                self.send_json(self._settings_response())
+            except Exception as exc:
+                self.send_json({"ok": False, "error": f"无法读取系统设置：{exc}"}, status=500)
+            return
+        if parsed.path == "/api/merge":
+            self.send_json(self._merge_payload())
+            return
+        if parsed.path == "/api/merge/confirmed":
+            payload = self._merge_confirmed_payload(query)
+            self.send_json(payload, status=400 if not payload.get("ok") else 200)
+            return
         if parsed.path == "/api/metadata/status":
             self.send_json(self.metadata_runner.status())
             return
@@ -2104,10 +2763,29 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         self.serve_static(parsed.path)
 
+    def do_PUT(self) -> None:
+        parsed = urlsplit(self.path)
+        if parsed.path == "/api/settings":
+            self._update_settings()
+            return
+        self.send_json({"ok": False, "error": "接口不存在"}, status=404)
+
     def do_POST(self) -> None:
         parsed = urlsplit(self.path)
         if is_crown_path(parsed.path):
             proxy_crown(self, "POST")
+            return
+        if parsed.path == "/api/merge/mapping":
+            self._handle_merge_mapping()
+            return
+        if parsed.path == "/api/merge/league-mapping":
+            self._handle_merge_league_mapping()
+            return
+        if parsed.path == "/api/settings/backup":
+            self._backup_database()
+            return
+        if parsed.path == "/api/settings/integrity":
+            self._check_database_integrity()
             return
         if parsed.path == "/api/event-presence":
             try:
@@ -2277,10 +2955,17 @@ def build_server(host: str, port: int, config: Dict[str, Any]) -> ThreadingHTTPS
     metadata_runner = MetadataSyncRunner(store)
     DashboardHandler.store = store
     DashboardHandler.metadata_runner = metadata_runner
+    DashboardHandler.config = config
+    raw_merge_path = Path(str(config.get("fixture_merge_db_path") or "fixture_merge.sqlite3")).expanduser()
+    merge_path = raw_merge_path if raw_merge_path.is_absolute() else PROJECT_DIR / raw_merge_path
+    merge_store = FixtureMergeStore(merge_path)
+    DashboardHandler.merge_store = merge_store
     server = ThreadingHTTPServer((host, port), DashboardHandler)
     server.daemon_threads = True
     server.odds_store = store  # type: ignore[attr-defined]
     server.metadata_runner = metadata_runner  # type: ignore[attr-defined]
+    server.dashboard_config = config  # type: ignore[attr-defined]
+    server.merge_store = merge_store  # type: ignore[attr-defined]
     print(
         f"[dashboard] 已启动 http://{host}:{port} | "
         f"近期消息={store.recent_rows} | 赛事={len(store.events)} | "
@@ -2315,6 +3000,7 @@ def main() -> None:
         server.server_close()
         server.metadata_runner.close()  # type: ignore[attr-defined]
         server.odds_store.close()  # type: ignore[attr-defined]
+        server.merge_store.close()  # type: ignore[attr-defined]
 
 
 if __name__ == "__main__":

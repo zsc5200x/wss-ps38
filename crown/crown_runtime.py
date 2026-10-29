@@ -65,12 +65,13 @@ auth = None
 monitor = None
 
 # ``get_game_more`` is a second read-only request per fixture. Keep bounded
-# per-fixture caches while the base today/live feed refreshes every six seconds.
+# per-fixture caches while the base today/live feed refreshes every four seconds.
+# Limit detail traffic separately so it does not crowd the base feed.
 _MORE_CACHE_TTL = 30.0
 _MORE_LIVE_CACHE_TTL = 10.0
-_MORE_MAX_WORKERS = 2
-_MORE_BATCH_SIZE = 12
-_MORE_LIVE_REFRESH_LIMIT = 4
+_MORE_MAX_WORKERS = 1
+_MORE_BATCH_SIZE = 6
+_MORE_LIVE_REFRESH_LIMIT = 2
 _more_cache_lock = threading.RLock()
 _more_cache = {}
 _more_detail_locks_lock = threading.Lock()
@@ -332,7 +333,7 @@ def _more_ids(row):
     }
 
 
-def _normalize_more_markets(rows, raw_format):
+def _normalize_more_markets(rows, raw_format, mode="today"):
     """Normalize every non-zero full-time line returned by ``game_more``.
 
     Crown uses a compact field catalogue rather than one XML node per market.
@@ -342,6 +343,7 @@ def _normalize_more_markets(rows, raw_format):
     unique to one selection.
     """
     result = {"handicap": [], "total": [], "moneyline": [], "rows": []}
+    live = str(mode or "").lower() == "live"
     seen = set()
     for row in rows if isinstance(rows, list) else []:
         if not isinstance(row, dict):
@@ -399,11 +401,7 @@ def _normalize_more_markets(rows, raw_format):
                 item.update({"home": pair["a"], "away": pair["b"]})
             result[kind].append(item)
 
-        moneyline = {
-            "home": _price(row.get("IOR_MH")),
-            "draw": _price(row.get("IOR_MN")),
-            "away": _price(row.get("IOR_MC")),
-        }
+        moneyline = _moneyline_fields(row, live=live)
         if any(moneyline.values()):
             result["moneyline"].append({**ids, **moneyline, "market_type": "moneyline", "odds_format": raw_format})
     return result
@@ -428,7 +426,7 @@ def _cached_more_markets(client, game, mode, raw_format):
                 return cached["value"]
         try:
             payload = client.game_more(game, mode)
-            value = _normalize_more_markets(payload.get("games", []), raw_format)
+            value = _normalize_more_markets(payload.get("games", []), raw_format, mode=mode)
             value["status"] = "loaded"
         except Exception:
             # A transient game_more failure must not erase alternate lines that
@@ -781,7 +779,6 @@ def _refresh_once_locked():
                 ),
                 "consecutive_failures": 0,
                 "last_success_at": timestamp,
-                "last_failure_reason": None,
             })
             state.update({
                 "events": events,
@@ -819,12 +816,36 @@ def _refresh_once_locked():
                 "cached": has_previous_events,
                 "diagnostics": diagnostics,
             })
+        # A saved session can be rejected after the user has already logged
+        # into a rotating Crown member tab. Queue an immediate shared-tab
+        # scan instead of waiting for the monitor's long retry window.
+        if reason == "session_conflict" and getattr(auth, "shared_browser_configured", False):
+            try:
+                auth.test(account["id"], background=True)
+            except (ValueError, RuntimeError, KeyError):
+                pass
         return {"ok": False, "reason": reason}
 
 
 def _price(value):
     text = str(value or "").strip()
     return text if text and text not in {"0", "0.000"} else ""
+
+
+def _moneyline_fields(row, *, live=False):
+    """Read Crown's three-way prices for both pre-match and live feeds.
+
+    The live feed uses the ``IOR_RM*`` field names while the pre-match feed
+    uses ``IOR_M*``. Some responses contain only one form, so each value falls
+    back independently and zero values never mask a valid alternate field.
+    """
+    row = row if isinstance(row, dict) else {}
+    primary = ("IOR_RMH", "IOR_RMN", "IOR_RMC") if live else ("IOR_MH", "IOR_MN", "IOR_MC")
+    fallback = ("IOR_MH", "IOR_MN", "IOR_MC") if live else ("IOR_RMH", "IOR_RMN", "IOR_RMC")
+    return {
+        name: _price(row.get(primary[index])) or _price(row.get(fallback[index]))
+        for index, name in enumerate(("home", "draw", "away"))
+    }
 
 
 def _market(line, left, right, raw_format="CROWN_HK"):
@@ -859,7 +880,8 @@ def _normalize_event(game, mode, display_format="HK", raw_format="CROWN_HK", mor
         total = _market(game.get("RATIO_OUO"), game.get("IOR_OUC"), game.get("IOR_OUH"), raw_format)
     # The account's verified odd_f_type is HK. Three-way prices are individual
     # display values, unlike the paired handicap/total IOR fields.
-    moneyline = [_price(game.get("IOR_MH")), _price(game.get("IOR_MN")), _price(game.get("IOR_MC"))]
+    moneyline_fields = _moneyline_fields(game, live=live)
+    moneyline = [moneyline_fields["home"], moneyline_fields["draw"], moneyline_fields["away"]]
     if not any(moneyline):
         moneyline = []
     score = " - ".join(item for item in (str(game.get("SCORE_H") or ""), str(game.get("SCORE_C") or "")) if item)

@@ -303,7 +303,7 @@ class CrownMemberClient:
 
 
 class CrownMemberMonitor:
-    """One serialized monitor with per-account backoff and bounded relogin."""
+    """One serialized session monitor; expired sessions require manual login."""
 
     def __init__(self, store, auth, *, client_factory=CrownMemberClient,
                  monotonic_fn=None, now_fn=None):
@@ -317,7 +317,6 @@ class CrownMemberMonitor:
         self._thread = None
         self._next_due = {}
         self._failures = {}
-        self._relogin = {}
         self._session_keys = {}
         self._clients = {}
         self._last_browser = {}
@@ -373,26 +372,6 @@ class CrownMemberMonitor:
         except (ValueError, RuntimeError, KeyError):
             pass
 
-    def _start_relogin(self, account, session=None):
-        identity = account["id"]
-        record = self._relogin.get(identity, {"next": 0, "attempts": 0})
-        now = self._monotonic()
-        if (self._stop.is_set() or (session is not None and not self._verified(account, session))
-                or self._is_busy(self.store.get_account(identity))):
-            return
-        if self.auth is None or now < record["next"] or record["attempts"] >= 3:
-            self._next_due[identity] = max(record["next"], now + 300)
-            return
-        try:
-            self.auth.start(identity)
-        except (ValueError, RuntimeError, KeyError):
-            self._next_due[identity] = now + 30
-            return
-        attempts = record["attempts"] + 1
-        self._relogin[identity] = {"attempts": attempts,
-                                   "next": now + min(1800, 120 * (2 ** (attempts - 1)))}
-        self._next_due[identity] = self._relogin[identity]["next"]
-
     def _update_state(self, account, session, status, message, updates=None, checked=True):
         """Apply only while both configuration and session remain unchanged."""
         if self._stop.is_set() or self._is_busy(account):
@@ -423,7 +402,6 @@ class CrownMemberMonitor:
                     self._session_keys[identity] = session_key
                     self._failures[identity] = 0
                     if not previous or previous[:2] != session_key[:2]:
-                        self._relogin.pop(identity, None)
                         self._next_due.pop(identity, None)
                     elif has_metadata and (not self._metadata_state.get(identity)
                                            or account.get("status") == "authenticated"):
@@ -432,10 +410,9 @@ class CrownMemberMonitor:
                     self._last_browser[identity] = now
                 self._metadata_state[identity] = has_metadata
                 explicitly_expired = account.get("status") == "expired"
-                if self._next_due.get(identity, 0) > now and not force and not explicitly_expired:
+                if explicitly_expired:
                     continue
-                if account.get("status") == "expired":
-                    self._start_relogin(account, session)
+                if self._next_due.get(identity, 0) > now and not force:
                     continue
                 if previous is None and account.get("status") != "authenticated":
                     self._request_browser_check(account, session)
@@ -458,31 +435,29 @@ class CrownMemberMonitor:
                         self._clients.pop(identity, None)
                         continue
                     self._failures[identity] = 0
-                    self._relogin.pop(identity, None)
                     self._next_due[identity] = now + HEARTBEAT_INTERVAL
                 except MemberNeedsBrowser:
                     self._clients.pop(identity, None)
                     self._request_browser_check(account, session)
                 except MemberExpired:
                     self._clients.pop(identity, None)
-                    if self._update_state(account, session, "expired", "会员站点确认会话失效，正在尝试重新登录"):
-                        self._next_due[identity] = now
+                    if self._update_state(account, session, "expired", "皇冠会话已失效，请手动重新登录"):
+                        self._next_due[identity] = now + 300
                         if getattr(self.auth, "shared_browser_configured", False):
                             # A visible Crown tab may already contain the login
-                            # that replaced this expired saved session.
+                            # that replaced this expired saved session. This
+                            # check only inspects the existing tab.
                             self._request_browser_check(account, session)
-                        else:
-                            self._start_relogin(account, session)
                 except MemberSessionConflict:
                     self._clients.pop(identity, None)
                     if self._update_state(account, session, "session_received",
-                                          "皇冠提示重复登录，请退出其他设备会话后重新登录"):
-                        self._next_due[identity] = now + 300
+                                          "已保存的皇冠会话被站点拒绝，正在检查已登录标签并同步最新会话"):
                         if getattr(self.auth, "shared_browser_configured", False):
-                            # The old saved UID usually lost to the user's newer
-                            # manual login. Reconcile with the visible tab before
-                            # asking the user to log in again.
-                            self._request_browser_check(account, session)
+                            # A manual login may finish just after the first scan.
+                            # Recheck the visible tab soon without opening a login page.
+                            self._request_browser_check(account, session, delay=10)
+                        else:
+                            self._next_due[identity] = now + 300
                 except MemberUnavailable:
                     self._clients.pop(identity, None)
                     count = self._failures.get(identity, 0) + 1

@@ -57,6 +57,41 @@ class CrownSessionErrorTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.reason, "upstream_response_invalid")
 
+    def test_connection_reset_gets_one_extra_short_retry(self):
+        calls = []
+        session = {
+            "member_origin": "https://m321.mos077.com",
+            "member_ui_verified": True,
+            "uid": "123456",
+            "member_protocol": {
+                "origin": "https://m321.mos077.com",
+                "ver": "1.0",
+                "langx": "zh",
+            },
+            "member_resume_query": {"ltype": "1", "odd_f_type": "H"},
+            "storage_state": {"cookies": [], "origins": []},
+        }
+        account = {"base_url": "https://m321.mos077.com"}
+
+        def transport(_url, _payload, _headers, _timeout):
+            calls.append(1)
+            if len(calls) <= 3:
+                raise ConnectionResetError("connection reset")
+            return 200, b"<serverresponse/>"
+
+        with patch("crown_local.backend.storage.validate_target_url", return_value=True), \
+                patch("crown_local.backend.crown_odds.parse_games_xml", return_value={"metadata": {}, "games": []}):
+            client = CrownOddsClient(
+                account,
+                session,
+                transport=transport,
+                sleep_fn=lambda _delay: None,
+            )
+            result = client.request_odds({"p": "get_game_list"})
+
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(result["_request_attempts"], 4)
+
     def test_legacy_certificate_is_allowed_only_for_crown_public_ip_pair(self):
         account = {"kind": "crown_odds", "base_url": "https://64.188.47.32"}
         self.assertTrue(_allow_legacy_ip_certificate(account, "https://43.229.3.127"))

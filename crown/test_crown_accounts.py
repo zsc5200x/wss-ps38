@@ -416,7 +416,7 @@ class CrownAccountTests(unittest.TestCase):
         service._launch = lambda background=True: object()
         service._acquire_context = lambda *_args: (context, False)
         inspected = []
-        service._sync_member_page = lambda _account, _context, page, _stored: (
+        service._sync_member_page = lambda _account, _context, page, _stored, **_kwargs: (
             inspected.append(page) or "synced"
         )
         stored = {"member_origin": "https://m829.crw066.com"}
@@ -426,6 +426,137 @@ class CrownAccountTests(unittest.TestCase):
 
         self.assertEqual(outcome, "synced")
         self.assertEqual(inspected, [crown_page])
+
+    def test_manual_shared_login_reuses_signed_crown_page_before_pinnacle(self):
+        crown_page = SimpleNamespace(
+            url="https://m473.mos077.com/", is_closed=lambda: False,
+        )
+        pinnacle_page = SimpleNamespace(
+            url="https://www.ps3838.com/zh-cn/sports/soccer", is_closed=lambda: False,
+        )
+        context = SimpleNamespace(pages=[crown_page, pinnacle_page])
+        service = AuthService.__new__(AuthService)
+        service._signed_member_origin = lambda page: (
+            "https://m473.mos077.com" if page is crown_page else ""
+        )
+        account = {"kind": "crown_odds", "base_url": "https://hga038.com"}
+
+        self.assertIs(service._shared_second_page(context, account, None), crown_page)
+
+    def test_manual_shared_login_does_not_reuse_unverified_or_pinnacle_pages(self):
+        pinnacle_page = SimpleNamespace(
+            url="https://www.ps3838.com/zh-cn/sports/soccer", is_closed=lambda: False,
+        )
+        unrelated_page = SimpleNamespace(
+            url="https://unrelated.example/", is_closed=lambda: False,
+        )
+        service = AuthService.__new__(AuthService)
+        service._signed_member_origin = lambda _page: ""
+        account = {"kind": "crown_odds", "base_url": "https://hga038.com"}
+
+        self.assertIsNone(service._shared_second_page(
+            SimpleNamespace(pages=[pinnacle_page]), account, None,
+        ))
+        self.assertIsNone(service._shared_second_page(
+            SimpleNamespace(pages=[pinnacle_page, unrelated_page]), account, None,
+        ))
+
+    def test_shared_tab_scan_finds_signed_crown_page_before_pinnacle(self):
+        """Crown sync is independent of tab order and never inspects Pinnacle."""
+        crown_page = SimpleNamespace(
+            url="https://rotating-member.example/", is_closed=lambda: False,
+        )
+        pinnacle_page = SimpleNamespace(
+            url="https://www.ps3838.com/zh-cn/sports/soccer", is_closed=lambda: False,
+        )
+        context = SimpleNamespace(pages=[crown_page, pinnacle_page])
+        service = AuthService.__new__(AuthService)
+        service._launch = lambda background=True: object()
+        service._acquire_context = lambda *_args: (context, False)
+        service._page_matches_account = lambda *_args: False
+        signed_checks = []
+
+        def signed_origin(page):
+            signed_checks.append(page)
+            return "https://rotating-member.example" if page is crown_page else ""
+
+        service._signed_member_origin = signed_origin
+        inspected = []
+
+        def inspect(_account, _context, page, _stored, **kwargs):
+            inspected.append((page, kwargs.get("adopted_origin")))
+            return "synced"
+
+        service._sync_member_page = inspect
+        stored = {"member_origin": "https://old-member.example/"}
+        account = {
+            "id": "account",
+            "kind": "crown_odds",
+            "base_url": "https://entry.example/",
+            "username": "a-different-account",
+        }
+
+        outcome = service._sync_shared_member_tabs(account, stored)
+
+        self.assertEqual(outcome, "synced")
+        self.assertEqual(signed_checks, [crown_page])
+        self.assertEqual(inspected, [(crown_page, "https://rotating-member.example")])
+
+    def test_shared_tab_scan_does_not_adopt_unverified_non_crown_pages(self):
+        unrelated_page = SimpleNamespace(
+            url="https://unrelated.example/", is_closed=lambda: False,
+        )
+        pinnacle_page = SimpleNamespace(
+            url="https://www.ps3838.com/zh-cn/sports/soccer", is_closed=lambda: False,
+        )
+        context = SimpleNamespace(pages=[pinnacle_page, unrelated_page])
+        service = AuthService.__new__(AuthService)
+        service._launch = lambda background=True: object()
+        service._acquire_context = lambda *_args: (context, False)
+        service._page_matches_account = lambda *_args: False
+        service._signed_member_origin = lambda _page: ""
+        service._sync_member_page = lambda *_args, **_kwargs: self.fail(
+            "unverified pages must not reach the Crown session synchronizer"
+        )
+
+        outcome = service._sync_shared_member_tabs(
+            {"id": "account", "kind": "crown_odds", "base_url": "https://entry.example/"},
+            {"member_origin": "https://old-member.example/"},
+        )
+
+        self.assertEqual(outcome, "not_signed_in")
+
+    def test_shared_tab_scan_adopts_rotating_member_origin(self):
+        class FakeFrame:
+            url = "https://m473.mos077.com/"
+
+        crown_page = SimpleNamespace(
+            url="https://m473.mos077.com/", frames=[FakeFrame()],
+            is_closed=lambda: False,
+            set_default_timeout=lambda _timeout: None,
+        )
+        pinnacle_page = SimpleNamespace(
+            url="https://www.ps3838.com/zh-cn/sports/soccer", is_closed=lambda: False,
+        )
+        context = SimpleNamespace(pages=[pinnacle_page, crown_page])
+        service = AuthService.__new__(AuthService)
+        service._launch = lambda background=True: object()
+        service._acquire_context = lambda *_args: (context, False)
+        service._member_signed_in = lambda _frame: True
+        inspected = []
+
+        def inspect(_account, _context, page, _stored, adopted_origin=""):
+            inspected.append((page, adopted_origin))
+            return "synced"
+
+        service._sync_member_page = inspect
+        stored = {"member_origin": "https://m829.crw066.com"}
+        account = {"id": "account", "kind": "crown_odds", "base_url": "https://hga038.com"}
+
+        outcome = service._sync_shared_member_tabs(account, stored)
+
+        self.assertEqual(outcome, "synced")
+        self.assertEqual(inspected, [(crown_page, "https://m473.mos077.com")])
 
     def test_visible_sync_conflict_does_not_replace_newer_session(self):
         class FakeFrame:

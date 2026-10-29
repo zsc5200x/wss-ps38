@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#0a0f19">
   <title>赔率数据终端</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20261029-0145">
+  <link rel="stylesheet" href="/static/styles.css?v=20261030-1">
 </head>
 <body>
   <div class="ambient ambient-a" aria-hidden="true"></div>
@@ -18,41 +18,12 @@
         <button class="page-nav-button active" type="button" data-page="home" aria-current="page">主页</button>
         <button class="page-nav-button" type="button" data-page="pinnacle">平博数据</button>
         <button class="page-nav-button" type="button" data-page="crown">皇冠数据</button>
+        <button class="page-nav-button" type="button" data-page="my-events">我的赛事</button>
+        <button class="page-nav-button" type="button" data-page="merge">赛事合并</button>
+        <button class="page-nav-button" type="button" data-page="settings">系统设置</button>
       </nav>
 
-      <div class="topbar-actions">
-        <button id="pauseButton" class="button ghost" type="button" aria-pressed="false" aria-label="暂停自动刷新">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M8 5v14M16 5v14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-          </svg>
-          <span>暂停刷新</span>
-        </button>
-        <button id="refreshButton" class="button primary" type="button" aria-label="立即刷新">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M20 7v5h-5M4 17v-5h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-            <path d="M18.2 9A7 7 0 0 0 6.1 6.8L4 9m16 6-2.1 2.2A7 7 0 0 1 5.8 15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-          <span>立即刷新</span>
-        </button>
-      </div>
     </header>
-
-    <section class="topbar-telemetry" aria-label="数据接收状态">
-      <div class="telemetry-status">
-        <div id="connectionPill" class="status-pill loading" aria-live="polite">
-          <span class="status-dot"></span>
-          <span id="connectionText">正在连接</span>
-        </div>
-      </div>
-      <div class="telemetry-source">
-        <span class="label">当前数据源</span>
-        <strong id="telemetrySource">PS3838 / Pinnacle Feed</strong>
-      </div>
-      <div class="last-capture">
-        <span class="label">最后数据</span>
-        <strong id="lastCapture">--:--:--</strong>
-      </div>
-    </section>
 
     <div id="pinnaclePage" class="page-view hidden" data-page-panel="pinnacle" aria-label="平博实时数据看板">
     <section class="metrics-grid" aria-label="实时指标">
@@ -334,6 +305,268 @@
       ></iframe>
     </section>
 
+    <section id="myEventsPage" class="page-view workspace-placeholder-page hidden" data-page-panel="my-events" aria-labelledby="myEventsTitle">
+      <header class="workspace-placeholder-heading">
+        <h1 id="myEventsTitle">我的赛事</h1>
+      </header>
+      <div id="myEventsContent" class="panel workspace-placeholder-state">
+        <strong>暂无赛事，待接入</strong>
+      </div>
+    </section>
+
+    <section id="mergePage" class="page-view merge-page hidden" data-page-panel="merge" aria-labelledby="mergePageTitle">
+      <header class="merge-heading">
+        <div>
+          <div class="eyebrow">FIXTURE MATCHING</div>
+          <h1 id="mergePageTitle">赛事合并</h1>
+        </div>
+        <button id="mergeRefreshButton" class="button ghost merge-refresh-button" type="button" aria-label="刷新赛事列表" title="刷新赛事列表">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M20 7v5h-5M4 17v-5h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M18.2 9A7 7 0 0 0 6.1 6.8L4 9m16 6-2.1 2.2A7 7 0 0 1 5.8 15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span>刷新</span>
+        </button>
+      </header>
+      <div class="merge-summary" aria-live="polite" aria-atomic="true">
+        <button id="mergeCrownSourceButton" class="merge-summary-source active" type="button" data-merge-source="crown" aria-pressed="true">
+          <strong id="mergeCrownCount">--</strong><span>皇冠赛事</span>
+        </button>
+        <button id="mergePinnacleSourceButton" class="merge-summary-source" type="button" data-merge-source="pinnacle" aria-pressed="false">
+          <strong id="mergePinnacleCount">--</strong><span>平博赛事</span>
+        </button>
+        <span><strong id="mergeMappedCount">--</strong> 已确认</span>
+        <span><strong id="mergePendingCount">--</strong> 待处理</span>
+      </div>
+      <div class="merge-toolbar">
+        <label class="search-field merge-search-field" for="mergeSearch">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"/>
+            <path d="m16 16 4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+          <span class="sr-only">搜索联赛、队名或赛事 ID</span>
+          <input id="mergeSearch" type="search" placeholder="搜索联赛、队名或赛事 ID" autocomplete="off" spellcheck="false">
+        </label>
+        <div class="merge-filters" role="group" aria-label="按合并状态筛选">
+          <button class="merge-filter-button active" type="button" data-merge-filter="all" aria-pressed="true">全部</button>
+          <button class="merge-filter-button" type="button" data-merge-filter="pending" aria-pressed="false">待处理</button>
+          <button class="merge-filter-button" type="button" data-merge-filter="mapped" aria-pressed="false">已确认</button>
+        </div>
+      </div>
+      <p class="merge-policy">平台赛事 ID 各自独立；开赛时间统一换算为北京时间参与匹配；系统只提供候选，确认后才建立映射。</p>
+      <div id="mergeError" class="merge-error hidden" role="alert"></div>
+      <div id="mergeLoading" class="merge-state" role="status">正在读取两家赛事...</div>
+      <div id="mergeEmpty" class="merge-state hidden" role="status"></div>
+      <datalist id="mergeCrownOptions"></datalist>
+      <datalist id="mergePinnacleOptions"></datalist>
+      <datalist id="mergePinnacleLeagueOptions"></datalist>
+      <div id="mergeGroups" class="merge-groups" aria-live="polite"></div>
+    </section>
+
+    <section id="settingsPage" class="page-view settings-page hidden" data-page-panel="settings" aria-labelledby="settingsPageTitle">
+      <header class="settings-heading">
+        <div>
+          <div class="eyebrow">CONTROL CENTER</div>
+          <h1 id="settingsPageTitle">系统设置</h1>
+          <p>管理采集运行参数、历史数据维护和当前浏览器的看板偏好。</p>
+        </div>
+        <div class="settings-heading-actions">
+          <span id="settingsSaveStatus" class="settings-save-status" role="status">读取配置中…</span>
+          <button id="settingsRefreshButton" class="button ghost" type="button" title="重新读取设置状态">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M20 7v5h-5M4 17v-5h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M18.2 9A7 7 0 0 0 6.1 6.8L4 9m16 6-2.1 2.2A7 7 0 0 1 5.8 15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span>刷新状态</span>
+          </button>
+          <button id="settingsSaveButton" class="button primary" type="button">保存配置</button>
+        </div>
+      </header>
+
+      <div id="settingsRestartNotice" class="settings-notice hidden" role="status"></div>
+
+      <section class="settings-section" aria-labelledby="settingsStatusTitle">
+        <div class="settings-section-heading">
+          <div>
+            <div class="eyebrow">RUNTIME HEALTH</div>
+            <h2 id="settingsStatusTitle">运行概况</h2>
+          </div>
+          <span id="settingsStatusUpdated" class="settings-section-meta">等待状态</span>
+        </div>
+        <div class="settings-status-grid">
+          <article class="settings-status-item">
+            <span>看板服务</span>
+            <strong id="settingsDashboardState">等待检查</strong>
+            <small id="settingsDashboardDetail">接口健康状态</small>
+          </article>
+          <article class="settings-status-item">
+            <span>实时数据</span>
+            <strong id="settingsDataState">等待检查</strong>
+            <small id="settingsDataDetail">最近采集时间</small>
+          </article>
+          <article class="settings-status-item">
+            <span>SQLite 历史</span>
+            <strong id="settingsDatabaseState">等待检查</strong>
+            <small id="settingsDatabaseDetail">历史点数与写入状态</small>
+          </article>
+          <article class="settings-status-item">
+            <span>元数据</span>
+            <strong id="settingsMetadataState">等待检查</strong>
+            <small id="settingsMetadataDetail">完整、部分和缺失赛事</small>
+          </article>
+        </div>
+      </section>
+
+      <div class="settings-grid">
+        <section class="settings-section" aria-labelledby="settingsPreferenceTitle">
+          <div class="settings-section-heading">
+            <div>
+              <div class="eyebrow">LOCAL PREFERENCE</div>
+              <h2 id="settingsPreferenceTitle">界面偏好</h2>
+            </div>
+            <span class="settings-section-meta">立即生效 · 保存在本机浏览器</span>
+          </div>
+          <div class="settings-form-grid">
+            <label class="settings-field">
+              <span>默认打开页面</span>
+              <select id="settingsDefaultPage">
+                <option value="home">主页</option>
+                <option value="pinnacle">平博数据</option>
+                <option value="crown">皇冠数据</option>
+                <option value="my-events">我的赛事</option>
+                <option value="merge">赛事合并</option>
+                <option value="settings">系统设置</option>
+              </select>
+            </label>
+            <label class="settings-field">
+              <span>默认赛事排序</span>
+              <select id="settingsDefaultSort">
+                <option value="stable">稳定排序</option>
+                <option value="kickoff">开赛时间</option>
+                <option value="name">比赛名称</option>
+              </select>
+            </label>
+            <label class="settings-field">
+              <span>默认元数据筛选</span>
+              <select id="settingsDefaultFilter">
+                <option value="all">全部</option>
+                <option value="complete">完整</option>
+                <option value="partial">部分</option>
+                <option value="missing">缺失</option>
+              </select>
+            </label>
+            <label class="settings-field">
+              <span>默认历史范围</span>
+              <select id="settingsDefaultHistory">
+                <option value="1">近 1 小时</option>
+                <option value="6">近 6 小时</option>
+                <option value="24">近 24 小时</option>
+                <option value="168">近 7 天</option>
+                <option value="720">近 30 天</option>
+              </select>
+            </label>
+            <label class="settings-field">
+              <span>变化流显示条数</span>
+              <select id="settingsChangeLimit">
+                <option value="8">8 条</option>
+                <option value="12">12 条</option>
+                <option value="24">24 条</option>
+              </select>
+            </label>
+          </div>
+        </section>
+
+        <section class="settings-section" aria-labelledby="settingsRuntimeTitle">
+          <div class="settings-section-heading">
+            <div>
+              <div class="eyebrow">COLLECTION RUNTIME</div>
+              <h2 id="settingsRuntimeTitle">采集与存储</h2>
+            </div>
+            <span class="settings-section-meta">保存后按提示重启对应服务</span>
+          </div>
+          <div class="settings-form-grid">
+            <label class="settings-field">
+              <span>赛事存在性检查间隔 <em>秒</em></span>
+              <input id="settingsPresenceInterval" type="number" min="5" max="60" step="1" inputmode="numeric">
+              <small>范围 5–60 秒，影响采集器检查页面是否仍有赛事。</small>
+            </label>
+            <label class="settings-field">
+              <span>实时快照处理间隔 <em>秒</em></span>
+              <input id="settingsSnapshotInterval" type="number" min="0.1" max="10" step="0.1" inputmode="decimal">
+              <small>范围 0.1–10 秒，过小会增加 CPU 和磁盘压力。</small>
+            </label>
+            <label class="settings-field">
+              <span>采集文件轮转大小 <em>MB</em></span>
+              <select id="settingsRotationMb">
+                <option value="0">关闭轮转</option>
+                <option value="128">128 MB</option>
+                <option value="256">256 MB</option>
+                <option value="512">512 MB</option>
+                <option value="1024">1 GB</option>
+              </select>
+            </label>
+            <label class="settings-field">
+              <span>旧采集文件压缩等待 <em>小时</em></span>
+              <input id="settingsCompressAfter" type="number" min="0" max="720" step="1" inputmode="numeric">
+              <small>只影响已经轮转的文件，0 表示不等待。</small>
+            </label>
+            <label class="settings-field">
+              <span>压缩文件最小大小 <em>MB</em></span>
+              <input id="settingsCompressMin" type="number" min="1" max="1024" step="1" inputmode="numeric">
+            </label>
+            <label class="settings-field">
+              <span>数据库备份保留数量 <em>份</em></span>
+              <input id="settingsBackupKeep" type="number" min="1" max="30" step="1" inputmode="numeric">
+            </label>
+          </div>
+          <div class="settings-paths" aria-label="当前数据路径">
+            <div><span>采集文件</span><code id="settingsCapturePath">--</code></div>
+            <div><span>SQLite 数据库</span><code id="settingsDatabasePath">--</code></div>
+            <div><span>备份目录</span><code id="settingsBackupPath">--</code></div>
+          </div>
+        </section>
+      </div>
+
+      <section class="settings-section" aria-labelledby="settingsMaintenanceTitle">
+        <div class="settings-section-heading">
+          <div>
+            <div class="eyebrow">DATA MAINTENANCE</div>
+            <h2 id="settingsMaintenanceTitle">数据维护</h2>
+          </div>
+          <span class="settings-section-meta">操作结果会显示在这里</span>
+        </div>
+        <div class="settings-maintenance-grid">
+          <div class="settings-maintenance-copy">
+            <strong id="settingsMaintenanceSummary">等待维护状态</strong>
+            <p id="settingsMaintenanceDetail">可以检查元数据、补全缺失赛事、备份数据库或检查 SQLite 完整性。</p>
+          </div>
+          <div class="settings-maintenance-actions">
+            <button id="settingsMetadataCheckButton" class="button ghost" type="button">检查元数据</button>
+            <button id="settingsMetadataRepairButton" class="button primary" type="button">一键补全</button>
+            <button id="settingsBackupButton" class="button ghost" type="button">立即备份数据库</button>
+            <button id="settingsIntegrityButton" class="button ghost" type="button">检查 SQLite</button>
+          </div>
+        </div>
+        <p id="settingsMaintenanceResult" class="settings-maintenance-result" role="status"></p>
+      </section>
+
+      <section class="settings-section settings-advanced-section" aria-labelledby="settingsAdvancedTitle">
+        <div class="settings-section-heading">
+          <div>
+            <div class="eyebrow">ADVANCED CONNECTION</div>
+            <h2 id="settingsAdvancedTitle">连接信息</h2>
+          </div>
+          <span class="settings-section-meta">只读 · 修改请编辑配置并重启</span>
+        </div>
+        <div class="settings-readonly-grid">
+          <div><span>CDP 地址</span><code id="settingsCdpUrl">--</code></div>
+          <div><span>目标域名</span><code id="settingsTargetHosts">--</code></div>
+          <div><span>Chrome 配置目录</span><code id="settingsChromeProfile">--</code></div>
+          <div><span>平博启动地址</span><code id="settingsStartUrl">--</code></div>
+        </div>
+      </section>
+    </section>
+
     <footer class="footer-bar">
       <div class="source-path">
         <span class="status-dot"></span>
@@ -344,6 +577,6 @@
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/static/app.js?v=20261029-0145" defer></script>
+  <script src="/static/app.js?v=20261030-1" defer></script>
 </body>
 </html>

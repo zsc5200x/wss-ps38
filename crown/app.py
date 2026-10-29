@@ -18,8 +18,11 @@ from crown_runtime import (
 
 HOST = "127.0.0.1"
 PORT = 8887
-CROWN_REFRESH_SECONDS = 6
-CROWN_FAILURE_BACKOFF_SECONDS = (10, 20, 40, 60)
+# The upstream list call usually completes in about one second. A four-second
+# cadence keeps the feed materially fresher while leaving headroom for Crown's
+# rate limits, connection jitter, and slower responses.
+CROWN_REFRESH_SECONDS = 4
+CROWN_FAILURE_BACKOFF_SECONDS = (4, 8, 16, 30)
 
 
 def _crown_retry_delay(result):
@@ -29,6 +32,8 @@ def _crown_retry_delay(result):
     if reason == "refresh_in_progress":
         return 2
     if reason == "no_session":
+        return 5
+    if reason == "session_conflict":
         return 5
     if reason == "runtime_unavailable":
         return 30

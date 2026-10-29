@@ -94,7 +94,7 @@ class CrownOddsClient(CrownMemberClient):
             raise ValueError('仅允许已验证的赛事和盘口只读操作')
         payload = {'uid':self.uid, 'ver':self.protocol['ver'], 'langx':self.protocol['langx'], **fields}
         url = self.origin + '/transform.php?' + urlencode({'ver':self.protocol['ver']})
-        for attempt in range(self.max_retries + 1):
+        for attempt in range(self.max_retries + 2):
             reason = None
             retryable = True
             try:
@@ -145,7 +145,10 @@ class CrownOddsClient(CrownMemberClient):
                                                   request_attempts=attempt + 1)
                         parsed['_request_attempts'] = attempt + 1
                         return parsed
-            if not retryable or attempt >= self.max_retries:
+            retry_limit = self.max_retries
+            if reason == 'upstream_connection_failed':
+                retry_limit += 1
+            if not retryable or attempt >= retry_limit:
                 raise OddsUnavailable(reason, request_attempts=attempt + 1) from None
             self.sleep_fn(self.retry_delay * (2 ** attempt))
 

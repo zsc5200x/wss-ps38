@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="dark">
 <meta name="theme-color" content="#080d16">
 <title>皇冠赛事 · Crown Odds Terminal</title>
-<link rel="stylesheet" href="/crown/static/app.css">
+<link rel="stylesheet" href="/crown/static/app.css?v=20261029-2">
 </head>
 <body>
 <div class="ambient ambient-a" aria-hidden="true"></div>
@@ -25,25 +25,11 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="m10 17 5-5-5-5M15 12H3"/></svg>
         <span>连接会话</span>
       </button>
-      <button class="button ghost" id="pauseRefresh" type="button" aria-pressed="false" title="暂停自动刷新">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M8 5v14M16 5v14"/></svg>
-        <span>暂停刷新</span>
-      </button>
-      <button class="button primary" id="refreshButton" type="button" title="立即刷新">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M18.2 9A7 7 0 0 0 6.1 6.8L4 9m16 6-2.1 2.2A7 7 0 0 1 5.8 15"/></svg>
-        <span>立即刷新</span>
-      </button>
       <button class="icon-button" id="settingsButton" type="button" aria-label="打开页面设置" title="页面设置">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h10M18 6h2M4 12h2M10 12h10M4 18h10M18 18h2"/><circle cx="16" cy="6" r="2"/><circle cx="8" cy="12" r="2"/><circle cx="16" cy="18" r="2"/></svg>
       </button>
     </div>
   </header>
-
-  <section class="topbar-telemetry" aria-label="皇冠数据接收状态">
-    <div class="telemetry-status"><div id="crownConnectionPill" class="status-pill loading" aria-live="polite"><span class="status-dot"></span><span id="crownConnectionText">正在连接</span></div></div>
-    <div class="telemetry-source"><span class="label">当前数据源</span><strong>当前项目 · CROWN ODDS</strong></div>
-    <div class="last-capture"><span class="label">最后更新</span><strong id="crownUpdatedAt">--:--:--</strong></div>
-  </section>
 
   <section class="metrics-grid" aria-label="皇冠实时指标">
     <article class="metric-card">
@@ -62,8 +48,8 @@
       <div class="metric-foot"><span id="crownDataState">等待数据</span><span>只读</span></div>
     </article>
     <article class="metric-card">
-      <div class="metric-head"><span>自动刷新</span><span class="micro-badge live">3 SEC</span></div>
-      <strong>3 秒</strong>
+      <div class="metric-head"><span>自动刷新</span><span class="micro-badge live">1 SEC</span></div>
+      <strong>1 秒</strong>
       <div class="metric-foot"><span id="crownPollState">轮询运行中</span><span>HK</span></div>
     </article>
   </section>
@@ -85,7 +71,7 @@
     </section>
   </main>
 
-  <footer class="app-footer"><span>当前项目独立皇冠运行时 · 凭据和会话仅保存在本机</span><span>港赔 HK · 3 秒轮询</span></footer>
+  <footer class="app-footer"><span>当前项目独立皇冠运行时 · 凭据和会话仅保存在本机</span><span>港赔 HK · 1 秒显示刷新</span></footer>
 </div>
 
 <div class="settings-modal" id="settingsModal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
@@ -118,6 +104,6 @@
   </section>
 </div>
 
-<script src="/crown/static/app.js"></script>
+<script src="/crown/static/app.js?v=20261030-1"></script>
 </body>
 </html>

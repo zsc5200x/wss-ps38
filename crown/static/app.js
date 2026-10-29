@@ -44,7 +44,20 @@ function installSportsDialogA11y(){
 installSportsDialogA11y();
 
 const crown$=id=>document.getElementById(id);
-const crownEmbedded=new URLSearchParams(window.location.search).get("embed")==="1";
+const crownQuery=new URLSearchParams(window.location.search);
+const crownEmbedded=crownQuery.get("embed")==="1";
+// The homepage requests fixtures=1 for the combined Crown + Pinnacle view.
+// The standalone Crown page stays Crown-only even though it is embedded too.
+const crownFixtures=crownQuery.get("fixtures")==="1";
+if(crownFixtures){
+  crown$("eventsTitle").textContent="实时数据流";
+  const eyebrow=crown$("eventsTitle").closest(".panel-title-row")?.querySelector(".eyebrow");
+  if(eyebrow)eyebrow.textContent="实时数据流";
+  crown$("crownSubStatus").textContent="正在读取实时数据流…";
+  crown$("crownSourceLabel").textContent="实时数据流";
+  const loadingTitle=crown$("crownEvents").querySelector(".event-list-empty strong");
+  if(loadingTitle)loadingTitle.textContent="正在读取实时数据流";
+}
 const crownCollapsedGroups=new Set();
 let crownSelectedId="";
 let crownLatestState={events:[],leagues:[],status:"检查中"};
@@ -54,9 +67,14 @@ let crownUpdateInFlight=false;
 let crownAccountGeneration=0;
 let crownRefreshPaused=false;
 let crownLastAccountsFetchAt=0;
+let crownLastSessionProbeAt=0;
+let crownSessionProbeInFlight=false;
 const crownExtraAttempts=new Map();
 const crownExtraLoading=new Set();
 const crownAccountActionsInFlight=new Set();
+const crownConfirmedById=new Map();
+const crownConfirmedLoading=new Set();
+const crownConfirmedAttempts=new Map();
 
 function crownPostEmbeddedState(){
   if(!crownEmbedded||window.parent===window)return;
@@ -72,15 +90,27 @@ function crownSetPaused(paused){
 
 function crownEsc(value){return String(value??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
 function crownLive(event){return !!event.is_live;}
-function crownFormatMatchPhase(period,minute,fallback){
-  const rawPeriod=String(period??"").trim();
+function crownFinished(event){
+  if(event?.is_finished===true||event?.finished===true)return true;
+  const finished=new Set(["FT","FULL_TIME","FULLTIME","FINISHED","FINAL","ENDED","END","COMPLETE","COMPLETED","已结束","完赛","已完赛"]);
+  const phases=[event?.match_status,event?.finish_status].map(value=>String(value??"").trim().toUpperCase().replace(/[\s-]+/g,"_"));
+  if(phases.some(phase=>finished.has(phase)))return true;
+  const minute=String(event?.minute??"").trim().toUpperCase().replace(/[\s-]+/g,"_");
+  if(finished.has(minute))return true;
+  const embedded=minute.match(/^([A-Z][A-Z0-9_-]*)\s*\^/);
+  return Boolean(embedded&&finished.has(embedded[1]));
+}
+function crownFormatMatchPhase(minute,fallback){
   const rawMinute=String(minute??"").trim();
   const labels={"1H":"上半场","1ST":"上半场","1":"上半场","2H":"下半场","2ND":"下半场","2":"下半场","HT":"中场","HALF_TIME":"中场","HALFTIME":"中场","FT":"已结束","FINISHED":"已结束","FINAL":"已结束","ET":"加时赛","EXTRA_TIME":"加时赛","EXTRATIME":"加时赛","P":"点球","PEN":"点球","PENALTIES":"点球","LIVE":"进行中"};
-  const embedded=rawMinute.match(/^([A-Za-z0-9]+)\s*\^\s*(.+)$/);
-  if(embedded){const embeddedLabel=labels[String(embedded[1]).toUpperCase()];if(embeddedLabel)return `${embeddedLabel} ${embedded[2].trim()}${["FT","FINISHED","FINAL"].includes(rawPeriod.toUpperCase())?" · 已结束":""}`;}
-  const label=labels[rawPeriod.toUpperCase()];
-  if(label&&["上半场","下半场","加时赛","进行中"].includes(label)&&rawMinute)return `${label} ${rawMinute}`;
-  return label||rawMinute||fallback||"开赛时间未知";
+  const embedded=rawMinute.match(/^([A-Za-z0-9][A-Za-z0-9_-]*)\s*\^\s*(.+)$/);
+  if(embedded){
+    const marker=embedded[1].toUpperCase().replace(/[\s-]+/g,"_");
+    const value=embedded[2].trim();
+    const label=labels[marker==="MTIME"?value.toUpperCase():marker];
+    if(label)return marker==="MTIME"||label==="已结束"?label:`${label} ${value}`;
+  }
+  return labels[rawMinute.toUpperCase()]||rawMinute||fallback||"开赛时间未知";
 }
 function crownNormalizeLine(value){return String(value??"").trim().replace(/\s+/g,"").replace(/[–—−]/g,"-");}
 function crownHandicapLine(line,side){
@@ -97,6 +127,7 @@ function crownTimeLabel(value){
   return new Intl.DateTimeFormat("zh-CN",{timeZone:"Asia/Shanghai",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false}).format(date);
 }
 function crownStatusKind(state){
+  if(state.error==="session_conflict")return state.cached?"delayed":"loading";
   const status=String(state.status||"");
   if(status==="已连接"&&!state.error)return "live";
   if(/需要重新登录|过期|未连接/.test(status))return "offline";
@@ -105,13 +136,36 @@ function crownStatusKind(state){
   return "loading";
 }
 function crownLoadedExtra(event){const extra=event&&event.extra_markets;return extra&&extra.status==="loaded"?extra:null;}
+function crownLineKey(value){
+  const text=String(value??"").normalize("NFKC").replace(/[–—−]/g,"-").replace(/\s+/g,"");
+  const parts=text.split("/");
+  const values=parts.map(Number);
+  if(parts.length===1&&Number.isFinite(values[0]))return `n:${values[0].toFixed(3)}`;
+  if(parts.length===2&&values.every(Number.isFinite)){
+    if(parts[0].startsWith("-")&&!parts[1].startsWith("+")&&!parts[1].startsWith("-"))values[1]=-Math.abs(values[1]);
+    return `n:${((values[0]+values[1])/2).toFixed(3)}`;
+  }
+  return `s:${text.toLowerCase()}`;
+}
 function crownMarketItems(event,kind){
   const base=event&&event.markets&&Array.isArray(event.markets[kind])?event.markets[kind]:[];
   const extra=crownLoadedExtra(event);
   const items=extra&&Array.isArray(extra[kind])?extra[kind]:[];
-  return items.length?items:base;
+  if(!items.length)return base;
+  if(kind==="moneyline")return base.length?base:items;
+  const merged=[...base];
+  const lines=new Set(base.map(item=>crownLineKey(item&& (item.raw_line||item.line))));
+  items.forEach(item=>{
+    const key=crownLineKey(item&& (item.raw_line||item.line));
+    if(lines.has(key))return;
+    lines.add(key);
+    merged.push(item);
+  });
+  return merged;
 }
 function crownMoneylineValues(event){
+  const base=Array.isArray(event&&event.markets&&event.markets.moneyline)?event.markets.moneyline:[];
+  if(base.filter(value=>value!==undefined&&value!==null&&String(value)!=="").length>=3)return base;
   const extra=crownLoadedExtra(event);
   if(extra&&Array.isArray(extra.moneyline)&&extra.moneyline.length){
     const values=[];
@@ -123,7 +177,7 @@ function crownMoneylineValues(event){
     });
     if(values.filter(value=>value!==undefined&&value!==null&&String(value)!=="").length>=3)return values.slice(0,3);
   }
-  return Array.isArray(event&&event.markets&&event.markets.moneyline)?event.markets.moneyline:[];
+  return base;
 }
 function crownQuoteCount(event){
   return crownMarketItems(event,"handicap").length+crownMarketItems(event,"total").length+(crownMoneylineValues(event).length>=3?1:0);
@@ -132,7 +186,7 @@ function crownMarketStatusText(event,kind,count){
   const extra=event&&event.extra_markets;
   if(extra&&extra.status==="loaded"){
     const baseCount=event&&event.markets&&Array.isArray(event.markets[kind])?event.markets[kind].length:0;
-    if(kind==="moneyline"&&Array.isArray(extra.moneyline)&&extra.moneyline.length)return "主盘 + 附加盘";
+    if(kind==="moneyline")return `${count} 组盘口`;
     if(kind!=="moneyline"&&count>baseCount)return `主盘 + ${count-baseCount} 组附加盘`;
     return `${count} 组盘口`;
   }
@@ -141,12 +195,13 @@ function crownMarketStatusText(event,kind,count){
   return `${count} 组盘口`;
 }
 function crownGroupLabel(event){
-  if(crownLive(event))return crownFormatMatchPhase(event.period,event.minute,event.start_label);
+  if(crownLive(event))return crownFormatMatchPhase(event.minute,event.start_label);
   return event.start_label||"开赛时间未知";
 }
 function crownMarketId(item){return item&&(item.gidm||item.market_id||item.gid||item.hgid)||"";}
 function crownFilterEvents(events,query,filter){
   return events.filter(event=>{
+    if(crownFinished(event))return false;
     if(filter==="live"&&!crownLive(event))return false;
     if(filter==="prematch"&&crownLive(event))return false;
     return !query||[event.league,event.home,event.away,event.id].join(" ").toLowerCase().includes(query);
@@ -194,32 +249,130 @@ function crownMoneyline(event){
   const labels=[event.home||"主队","和局",event.away||"客队"];
   return `<article class="market-book moneyline"><header class="market-book-head"><h3>全场胜平负</h3><small>${crownEsc(statusText)}</small></header><div class="moneyline-grid">${labels.map((label,index)=>`<div class="moneyline-cell"><span>${crownEsc(label)}</span><strong>${crownEsc(values[index]||"—")}</strong></div>`).join("")}</div></article>`;
 }
+function crownConfirmedFor(event){
+  if(!crownFixtures)return null;
+  const id=String(event&&event.id||"");
+  return id?crownConfirmedById.get(id)||null:null;
+}
+function crownConfirmedCrownEvent(event,confirmed){
+  const source=confirmed&&((confirmed.crown||confirmed.crownEvent));
+  if(!source||typeof source!=="object")return event;
+  // Keep the live Crown row (score, minute and current markets) ahead of the
+  // persisted mapping snapshot while using the Crown snapshot as a fallback.
+  return {...source,...event,markets:event.markets||source.markets||{},extra_markets:event.extra_markets||source.extra_markets||{}};
+}
+function crownFormatPinnacleLine(value){
+  const number=Number(value);
+  if(!Number.isFinite(number))return String(value??"—");
+  const rounded=number.toFixed(2).replace(/\.?0+$/,"" );
+  return rounded==="-0"?"0":rounded;
+}
+function crownFormatPinnacleHandicap(value){
+  const number=Number(value);
+  if(!Number.isFinite(number))return crownFormatPinnacleLine(value);
+  if(Math.abs(number)<0.000001)return "0";
+  return `${number>0?"+":""}${crownFormatPinnacleLine(number)}`;
+}
+function crownFormatPinnacleTotal(value){
+  const number=Number(value);
+  if(!Number.isFinite(number))return crownFormatPinnacleLine(value);
+  const steps=Math.round(number*4);
+  if(Math.abs(number*4-steps)<0.000001&&Math.abs(steps)%2===1){
+    return `${crownFormatPinnacleLine(number-0.25)}/${crownFormatPinnacleLine(number+0.25)}`;
+  }
+  return crownFormatPinnacleLine(number);
+}
+function crownPinnacleTeams(event){
+  const home=String(event?.home||"").trim();
+  const away=String(event?.away||"").trim();
+  if(home||away)return [home||"主队",away||"客队"];
+  const parts=String(event?.name||"").split(/\s+VS\s+/i);
+  return [parts[0]||"主队",parts[1]||"客队"];
+}
+function crownPinnacleQuote(row,event){
+  const [home,away]=crownPinnacleTeams(event);
+  const market=String(row?.market||"");
+  const option=String(row?.option||"");
+  if(market==="1")return {label:{"0":`${home} 主胜`,"1":"和局","2":`${away} 客胜`}[option]||`选项 ${option}`,line:"全场"};
+  if(market==="2"){
+    const raw=Number(row?.line);
+    const side=option==="0"?raw:-raw;
+    const role=!Number.isFinite(side)||Math.abs(side)<0.000001?"平手":side<0?"让球":"受让";
+    return {label:`${option==="0"?home:away} ${crownFormatPinnacleHandicap(side)}`,line:role};
+  }
+  if(market==="3"){
+    const line=crownFormatPinnacleTotal(row?.line);
+    return {label:`${option==="3"?"大":"小"}${line}`,line:"总进球"};
+  }
+  return {label:`选项 ${option||"—"}`,line:`盘口 ${market||"—"}`};
+}
+function crownPinnaclePrice(row){
+  if(!row||row.quoted===false)return "—";
+  const hk=row.hongKongLabel??(row.hongKong==null?"":Number(row.hongKong).toFixed(3));
+  return String(hk||"—");
+}
+function crownPinnacleMarketBook(title,rows,event,marketCode){
+  const list=(Array.isArray(rows)?rows:[]).filter(row=>String(row?.market||"")===String(marketCode)&&row?.quoted!==false&&(row?.hongKong!=null||row?.hongKongLabel));
+  if(!list.length)return `<article class="market-book market-book-pinnacle"><header class="market-book-head"><h3>${title} · 平博</h3><small>当前没有有效盘口</small></header><div class="market-empty">平博暂无对应报价</div></article>`;
+  const lines=list.map(row=>{
+    const label=crownPinnacleQuote(row,event);
+    const price=crownPinnaclePrice(row);
+    return `<div class="pinnacle-quote-row"><div class="pinnacle-quote-label"><strong>${crownEsc(label.label)}</strong><span>${crownEsc(label.line)}</span></div><strong class="pinnacle-price">${crownEsc(price)}</strong></div>`;
+  }).join("");
+  return `<article class="market-book market-book-pinnacle"><header class="market-book-head"><h3>${title} · 平博</h3><small>${list.length} 条 · HK</small></header><div class="pinnacle-table-head"><span>投注项</span><span>香港盘</span></div>${lines}</article>`;
+}
+function crownConfirmedMarkets(confirmed,event){
+  if(!confirmed)return "";
+  const pinnacle=confirmed.pinnacle||confirmed.pinnacleEvent||{};
+  const rows=Array.isArray(pinnacle.odds)?pinnacle.odds:[];
+  const id=String(pinnacle.id||confirmed.pinnacleId||"");
+  const header=`<div class="markets-provider-title pinnacle-provider-title"><div><strong>平博对应盘口</strong><span>仅显示已确认关联赛事</span></div><small>平博 ID ${crownEsc(id||"—")}</small></div>`;
+  if(!rows.length)return `${header}<div class="market-book market-book-pinnacle market-book-pinnacle-empty"><div class="market-empty">已确认平博赛事，但当前还没有采集到对应盘口</div></div>`;
+  return `${header}${crownPinnacleMarketBook("胜平负",rows,event,"1")}${crownPinnacleMarketBook("让球",rows,event,"2")}${crownPinnacleMarketBook("大小球",rows,event,"3")}`;
+}
+function crownConfirmedSummary(confirmed,event){
+  if(!confirmed)return "";
+  const pinnacle=confirmed.pinnacle||confirmed.pinnacleEvent||{};
+  const crown=confirmed.crown||confirmed.crownEvent||event||{};
+  return `<div class="confirmed-merge-strip"><span class="confirmed-merge-badge">已确认关联</span><div><strong>${crownEsc(crown.league||event?.league||"皇冠联赛")}</strong><span>${crownEsc(crown.home||event?.home||"主队")} vs ${crownEsc(crown.away||event?.away||"客队")}</span></div><small>平博赛事 ${crownEsc(pinnacle.id||confirmed.pinnacleId||"—")}</small></div>`;
+}
 function crownEventDetail(event){
   if(!event)return `<div class="detail-empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M4 5h16v14H4z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg><strong>等待皇冠赛事数据</strong><p>打开皇冠登录并完成会话验证后，赛事和盘口会自动显示在这里。</p><button class="button primary" type="button" data-open-login>连接皇冠会话</button></div>`;
+  const confirmed=crownConfirmedFor(event);
+  event=crownConfirmedCrownEvent(event,confirmed);
   const markets=event.markets||{};
   const handicapItems=crownMarketItems(event,"handicap");
   const totalItems=crownMarketItems(event,"total");
   const score=event.score||"VS";
-  const detail=crownFormatMatchPhase(event.period,event.minute,event.start_label);
-  return `<article class="event-hero"><div class="event-hero-top"><div class="event-league"><span>${crownEsc(event.league||"未命名联赛")}</span></div><div class="event-hero-meta"><span class="meta-pill ${crownLive(event)?"live":""}">${crownLive(event)?"滚球":"今日待开"}</span><span class="meta-pill">${crownEsc(event.start_label||"时间未知")}</span><span class="meta-pill">皇冠 ID ${crownEsc(event.id||"—")}</span></div></div><div class="match-hero"><div class="match-team">${crownEsc(event.home||"主队")}</div><div class="match-score"><strong>${crownEsc(score)}</strong><span>${crownEsc(detail)}</span></div><div class="match-team away">${crownEsc(event.away||"客队")}</div></div></article><div class="detail-summary-row"><div><span>报价组数</span><strong>${crownQuoteCount(event)} 组</strong></div><div><span>盘口格式</span><strong>${crownEsc(event.odds_format_label||"皇冠港赔（HK）")}</strong></div><div><span>数据来源</span><strong>当前项目</strong></div></div><div class="markets-layout">${crownMoneyline(event)}${crownMarketBook("让球",handicapItems,"handicap",event)}${crownMarketBook("大小球",totalItems,"total",event)}</div>`;
+  const detail=crownFormatMatchPhase(event.minute,event.start_label);
+  const pinnacle=confirmed&&(confirmed.pinnacle||confirmed.pinnacleEvent);
+  const pinnacleId=String(pinnacle?.id||confirmed?.pinnacleId||"");
+  const eventIdMeta=crownFixtures
+    ? `<span class="meta-pill event-id-pill">皇冠比赛 ID ${crownEsc(event.id||"—")}</span><span class="meta-pill event-id-pill">平博比赛 ID ${crownEsc(pinnacleId||"待匹配")}</span>`
+    : `<span class="meta-pill">皇冠 ID ${crownEsc(event.id||"—")}</span>`;
+  const crownHeader=crownFixtures?"":`<div class="markets-provider-title crown-provider-title"><div><strong>皇冠盘口</strong><span>${crownEsc(event.odds_format_label||"皇冠港赔（HK）")}</span></div><small>皇冠 ID ${crownEsc(event.id||"—")}</small></div>`;
+  return `<article class="event-hero"><div class="event-hero-top"><div class="event-league"><span>${crownEsc(event.league||"未命名联赛")}</span></div><div class="event-hero-meta"><span class="meta-pill ${crownLive(event)?"live":""}">${crownLive(event)?"滚球":"今日待开"}</span><span class="meta-pill">${crownEsc(event.start_label||"时间未知")}</span>${eventIdMeta}</div></div><div class="match-hero"><div class="match-team">${crownEsc(event.home||"主队")}</div><div class="match-score"><strong>${crownEsc(score)}</strong><span>${crownEsc(detail)}</span></div><div class="match-team away">${crownEsc(event.away||"客队")}</div></div></article><div class="detail-summary-row"><div><span>皇冠报价组数</span><strong>${crownQuoteCount(event)} 组</strong></div><div><span>盘口格式</span><strong>${crownEsc(event.odds_format_label||"皇冠港赔（HK）")}</strong></div><div><span>数据来源</span><strong>${confirmed?"皇冠 + 平博":"当前项目"}</strong></div></div>${crownConfirmedSummary(confirmed,event)}<div class="markets-layout">${crownHeader}${crownMoneyline(event)}${crownMarketBook("让球",handicapItems,"handicap",event)}${crownMarketBook("大小球",totalItems,"total",event)}${crownConfirmedMarkets(confirmed,event)}</div>`;
 }
 function crownRender(state){
   crownLatestState=state;
   crownPostEmbeddedState();
   const events=Array.isArray(state.events)?state.events:[];
+  const activeEvents=events.filter(event=>!crownFinished(event));
   const query=crown$("crownSearch").value.trim().toLowerCase();
-  const filter=crown$("crownFilter").value;
-  const visible=crownFilterEvents(events,query,filter);
+  const filter=crownFixtures?"":crown$("crownFilter").value;
+  const visible=crownFilterEvents(activeEvents,query,filter);
   if(!visible.some(event=>event.id===crownSelectedId))crownSelectedId=visible[0]?.id||"";
   const selected=visible.find(event=>event.id===crownSelectedId)||null;
   if(selected)crownLoadExtra(selected);
-  const liveCount=events.filter(crownLive).length;
-  const todayCount=events.length-liveCount;
-  const leagueCount=Array.isArray(state.leagues)?state.leagues.length:new Set(events.map(event=>event.league)).size;
-  const quoteCount=events.reduce((total,event)=>total+crownQuoteCount(event),0);
+  if(selected)crownLoadConfirmed(selected);
+  const liveCount=activeEvents.filter(crownLive).length;
+  const todayCount=activeEvents.length-liveCount;
+  const leagueCount=new Set(activeEvents.map(event=>event.league).filter(Boolean)).size;
+  const quoteCount=activeEvents.reduce((total,event)=>total+crownQuoteCount(event),0);
   const kind=crownStatusKind(state);
-  const status=state.status||"检查中";
-  crown$("crownCount").textContent=events.length;
+  const syncingSession=state.error==="session_conflict";
+  const status=syncingSession?"正在同步会话":state.status||"检查中";
+  crown$("crownCount").textContent=activeEvents.length;
   crown$("crownLiveCount").textContent=`滚球 ${liveCount}`;
   crown$("crownTodayCount").textContent=`今日 ${todayCount}`;
   crown$("crownLeagueCount").textContent=leagueCount;
@@ -229,22 +382,46 @@ function crownRender(state){
   crown$("crownDataState").textContent=kind==="live"?"实时更新":state.cached?"缓存数据":kind==="delayed"?"数据延迟":kind==="offline"?"连接异常":"等待数据";
   crown$("crownStateBadge").textContent=kind==="live"?"在线":state.cached?"缓存":kind==="delayed"?"延迟":kind==="offline"?"异常":"检查中";
   crown$("crownStateBadge").className=`micro-badge ${kind==="live"?"live":kind==="offline"?"stale":"delayed"}`;
-  crown$("crownConnectionPill").className=`status-pill ${kind==="live"?"live":kind==="offline"?"offline":kind==="delayed"?"delayed":"loading"}`;
-  crown$("crownConnectionText").textContent=kind==="live"?"皇冠数据在线":state.cached?"展示最近成功缓存":kind==="delayed"?"上游延迟，保留最近数据":kind==="offline"?(state.error?"数据连接异常":"等待登录"):"正在连接";
-  crown$("crownUpdatedAt").textContent=crownTimeLabel(state.updated_at);
-  crown$("crownSubStatus").textContent=state.updated_at?`${state.cached?"缓存数据 · 上次更新":"最后更新"} ${crownTimeLabel(state.updated_at)} · 只读轮询`:"等待皇冠会话数据";
+  crown$("crownSubStatus").textContent=state.updated_at?`${state.cached?"缓存数据 · 上次更新":"最后更新"} ${crownTimeLabel(state.updated_at)} · 只读轮询`:crownFixtures?"等待实时数据":"等待皇冠会话数据";
   crown$("crownQuoteTotal").textContent=`${quoteCount} 组报价`;
-  const errorText={session_conflict:"皇冠提示重复登录。请先在皇冠站点退出其他设备上的会话，再打开登录面板重新登录。",session_expired:"皇冠会话已过期，请打开登录面板重新登录。",session_unverified:"皇冠会话需要重新验证，请打开登录面板完成验证。",upstream_unavailable:"皇冠上游暂时不可用，页面会保留最近数据并自动重试。",upstream_timeout:"皇冠上游响应超时，页面会保留最近数据并按退避间隔重试。",upstream_connection_failed:"无法连接皇冠上游，请检查网络和登录地址。",upstream_http_error:"皇冠上游返回异常状态，页面会自动退避重试。",upstream_response_invalid:"皇冠上游响应格式异常，页面会自动重试。",catalog_incomplete:"皇冠赛事目录暂未完整返回，页面会保留最近数据并重试。",catalog_changed:"皇冠赛事目录发生变化，等待下一次完整同步。"}[state.error]||"皇冠数据暂时不可用，请检查登录会话或稍后重试。";
+  const cachedUpstreamError=Boolean(state.cached)&&["upstream_unavailable","upstream_timeout","upstream_connection_failed","upstream_http_error"].includes(state.error);
+  const errorText={session_conflict:"皇冠拒绝的是系统保存的旧会话，这不代表当前浏览器标签未登录。系统正在检查并同步当前皇冠标签，期间暂显示最后一次成功数据。",session_expired:"皇冠会话已失效，请在当前皇冠标签重新登录。",session_unverified:"皇冠会话仍在验证，系统会继续检查当前皇冠标签。",upstream_unavailable:cachedUpstreamError?"皇冠标签会话已保留，但盘口接口暂时不可用；页面保留最近成功数据，并按退避间隔自动重试。":"皇冠上游暂时不可用，页面会保留最近数据并按退避间隔自动重试。",upstream_timeout:cachedUpstreamError?"皇冠标签会话已保留，但盘口接口响应超时；页面保留最近成功数据，并按退避间隔自动重试。":"皇冠上游响应超时，页面会保留最近数据并按退避间隔自动重试。",upstream_connection_failed:cachedUpstreamError?"皇冠标签会话已保留，但盘口接口连接失败；页面保留最近成功数据，并按退避间隔自动重试。":"皇冠上游暂时连接失败，系统会按退避间隔自动重试。",upstream_http_error:"皇冠上游返回异常状态，页面会自动退避重试。",upstream_response_invalid:"皇冠上游响应格式异常，页面会自动重试。",catalog_incomplete:"皇冠赛事目录暂未完整返回，页面会保留最近数据并重试。",catalog_changed:"皇冠赛事目录发生变化，等待下一次完整同步。"}[state.error]||"皇冠数据暂时不可用，请检查当前登录标签或稍后重试。";
   crown$("crownErrorText").textContent=state.cached&&state.updated_at?`${errorText} 当前展示 ${crownTimeLabel(state.updated_at)} 的最后成功缓存。`:errorText;
-  crown$("crownError").classList.toggle("hidden",kind!=="offline"&&kind!=="delayed");
+  crown$("crownError").classList.toggle("hidden",crownFixtures||(!syncingSession&&kind!=="offline"&&kind!=="delayed"));
   const signature=JSON.stringify([visible,state.leagues||[],state.status,state.error,state.cached,state.updated_at,query,filter,selected?.id||"",[...crownCollapsedGroups].sort()]);
   if(signature===crownRenderedSignature)return;
   crownRenderedSignature=signature;
   const live=visible.filter(crownLive);
   const prematch=visible.filter(event=>!crownLive(event));
   const groupHtml=`${crownEventGroup("live","滚球比赛",live)}${crownEventGroup("prematch","今日比赛",prematch)}`;
-  crown$("crownEvents").innerHTML=groupHtml||`<div class="event-list-empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M4 5h16v14H4z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg><strong>暂无皇冠赛事</strong><p>${query?"没有匹配当前搜索条件的赛事。":"完成皇冠登录后，滚球和今日赛事会自动出现在这里。"}</p>${!query?'<button class="button primary" type="button" data-open-login>连接皇冠会话</button>':""}</div>`;
+  const endedOnly=events.length>0&&activeEvents.length===0;
+  const emptyTitle=endedOnly?"暂无未结束赛事":crownFixtures?"暂无赛事数据":"暂无皇冠赛事";
+  const emptyText=endedOnly?"":query?"没有匹配当前搜索条件的赛事。":crownFixtures?"当前暂时没有可显示的赛事。":"完成皇冠登录后，滚球和今日赛事会自动出现在这里。";
+  crown$("crownEvents").innerHTML=groupHtml||`<div class="event-list-empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M4 5h16v14H4z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg><strong>${emptyTitle}</strong>${emptyText?`<p>${emptyText}</p>`:""}${!query&&!crownFixtures&&!endedOnly?'<button class="button primary" type="button" data-open-login>连接皇冠会话</button>':""}</div>`;
   crown$("crownEventDetail").innerHTML=crownEventDetail(selected);
+}
+async function crownLoadConfirmed(event,force=false){
+  if(!crownFixtures)return;
+  const crownId=String(event&&event.id||"");
+  if(!crownId||crownConfirmedLoading.has(crownId))return;
+  const lastAttempt=Number(crownConfirmedAttempts.get(crownId)||0);
+  if(!force&&Date.now()-lastAttempt<5000)return;
+  crownConfirmedAttempts.set(crownId,Date.now());
+  crownConfirmedLoading.add(crownId);
+  try{
+    const response=await fetch(`/api/merge/confirmed?crownId=${encodeURIComponent(crownId)}`,{cache:"no-store"});
+    if(!response.ok)return;
+    const payload=await response.json();
+    const item=Array.isArray(payload.items)?payload.items.find(entry=>String(entry?.crownId||entry?.crown?.id||entry?.crownEvent?.id||"")===crownId):null;
+    if(item)crownConfirmedById.set(crownId,item);
+    else crownConfirmedById.delete(crownId);
+    crownRenderedSignature="";
+    crownRender(crownLatestState);
+  }catch(error){
+    // A missing merge record is expected for ordinary unconfirmed Crown events.
+  }finally{
+    crownConfirmedLoading.delete(crownId);
+  }
 }
 async function crownLoadExtra(event){
   const gid=String(event&&event.id||"");
@@ -265,10 +442,11 @@ async function crownLoadExtra(event){
 }
 function crownSessionView(state){
   const connected=state.status==="已连接";
+  const syncingSession=state.error==="session_conflict";
   const delayed=state.status==="数据延迟"||state.status==="缓存数据"||state.cached;
   crown$("loginIndicator").className=`login-status-indicator ${connected?"connected":state.error?"error":""}`;
-  crown$("loginStatusTitle").textContent=connected?"皇冠会话已连接":`皇冠会话${state.status?" · "+state.status:""}`;
-  crown$("loginStatusCopy").textContent=connected?`只读赛事接口正常，最近更新：${state.updated_at||"刚刚"}`:delayed?`当前展示上次成功缓存，服务会自动恢复实时连接。最近更新：${state.updated_at||"未知"}`:"保存账号后，请在同一个 Chrome 窗口的皇冠普通标签页中手动登录。";
+  crown$("loginStatusTitle").textContent=connected?"皇冠会话已连接":syncingSession?"皇冠会话 · 正在同步":`皇冠会话${state.status?" · "+state.status:""}`;
+  crown$("loginStatusCopy").textContent=connected?`只读赛事接口正常，最近更新：${state.updated_at||"刚刚"}`:syncingSession?"皇冠拒绝了系统保存的旧会话，正在从当前皇冠标签同步；这不代表浏览器当前页面未登录。":delayed?`当前展示上次成功缓存，服务会自动恢复实时连接。最近更新：${state.updated_at||"未知"}`:"保存账号后，请在同一个 Chrome 窗口的皇冠普通标签页中手动登录。";
 }
 function crownAccountStatus(account){
   const labels={idle:"未登录",logging_in:"等待页面完成",checking:"检查中",awaiting_manual:"等待手动登录",session_received:"已保存会话",authenticated:"已验证",expired:"会话已过期",disabled:"已停用"};
@@ -311,7 +489,7 @@ async function crownUpdate(forceAccounts=false){
   crownUpdateInFlight=true;
   try{
     const loginDialogOpen=crown$("loginModal").classList.contains("open");
-    const accountPollInterval=loginDialogOpen?4000:15000;
+    const accountPollInterval=loginDialogOpen?4000:(crownLatestState.error?3000:15000);
     const includeAccounts=forceAccounts||Date.now()-crownLastAccountsFetchAt>=accountPollInterval;
     const accountGeneration=crownAccountGeneration;
     const accountPromise=includeAccounts?fetch("/api/crown/accounts",{cache:"no-store"}).catch(()=>null):null;
@@ -319,6 +497,18 @@ async function crownUpdate(forceAccounts=false){
     if(!eventResponse.ok)throw new Error("HTTP error");
     const data=await eventResponse.json();
     crownRender(data);crownSessionView(data);
+    if(data.error&&["session_conflict","session_expired","session_unverified"].includes(data.error)){
+      const now=Date.now();
+      if(!crownSessionProbeInFlight&&now-crownLastSessionProbeAt>=8000){
+        crownLastSessionProbeAt=now;
+        crownSessionProbeInFlight=true;
+        fetch("/api/crown/session/check",{method:"POST",cache:"no-store"})
+          .then(response=>response.ok?response.json():null)
+          .then(()=>crownUpdate(true))
+          .catch(()=>{})
+          .finally(()=>{crownSessionProbeInFlight=false;});
+      }
+    }
     if(accountPromise){
       const accountResponse=await accountPromise;
       crownLastAccountsFetchAt=Date.now();
@@ -329,12 +519,10 @@ async function crownUpdate(forceAccounts=false){
     }
   }catch(error){
     crown$("crownStatus").textContent="读取失败";
-    crown$("crownConnectionPill").className="status-pill offline";
-    crown$("crownConnectionText").textContent="页面连接失败";
     crown$("crownStateBadge").textContent="失败";
     crown$("crownStateBadge").className="micro-badge stale";
     crown$("crownErrorText").textContent="无法读取皇冠接口，请确认当前项目服务和后端仍然正常运行。";
-    crown$("crownError").classList.remove("hidden");
+    crown$("crownError").classList.toggle("hidden",crownFixtures);
   }finally{crownUpdateInFlight=false;}
 }
 async function crownCheck(){
@@ -406,13 +594,14 @@ crown$("crownEvents").addEventListener("click",event=>{
   const groupButton=event.target.closest("[data-group-toggle]");if(groupButton){const key=groupButton.dataset.groupToggle;if(crownCollapsedGroups.has(key))crownCollapsedGroups.delete(key);else crownCollapsedGroups.add(key);crownRender(crownLatestState);return;}
   const item=event.target.closest("[data-event-id]");if(!item)return;crownSelectedId=item.dataset.eventId;crownRender(crownLatestState);
 });
-crown$("crownEventDetail").addEventListener("click",event=>{if(event.target.closest("[data-open-login]"))loginOpen();});
+crown$("crownEventDetail").addEventListener("click",event=>{
+  if(event.target.closest("[data-open-login]")){loginOpen();return;}
+});
 crown$("checkCrownSession").addEventListener("click",crownCheck);
 crown$("crownAccounts").addEventListener("click",event=>{const button=event.target.closest("[data-account-action]");if(!button)return;const row=button.closest("[data-account-id]");if(!row)return;const action=button.dataset.accountAction;const username=row.querySelector(".account-row-name")?.textContent||"该账号";if(action==="delete"&&!window.confirm(`确认永久删除“${username}”？这会删除本地保存的账号和会话，且无法撤销。`))return;crownAccountAction(row.dataset.accountId,action);});
 crown$("crownSearch").addEventListener("input",()=>crownRender(crownLatestState));
 crown$("crownFilter").addEventListener("change",()=>crownRender(crownLatestState));
-crown$("refreshButton").addEventListener("click",()=>crownUpdate(true));
-crown$("pauseRefresh").addEventListener("click",()=>crownSetPaused(!crownRefreshPaused));
+// Refreshing stays automatic; the former manual controls are intentionally removed.
 if(crownEmbedded){
   window.addEventListener("message",event=>{
     if(event.origin!==window.location.origin||event.source!==window.parent)return;
@@ -425,4 +614,4 @@ if(crownEmbedded){
 }
 if(new URLSearchParams(window.location.search).get("openSettings")==="1")settingsOpen();
 crownUpdate();
-setInterval(()=>{if(!crownRefreshPaused)crownUpdate();},3000);
+setInterval(()=>{if(!crownRefreshPaused)crownUpdate();},1000);

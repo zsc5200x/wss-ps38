@@ -23,8 +23,8 @@ class EventFilterTests(unittest.TestCase):
         batch = crown_runtime._select_more_refresh_batch(games)
 
         self.assertEqual(len(batch), crown_runtime._MORE_BATCH_SIZE)
-        self.assertEqual([mode for _, mode in batch[:4]], ["live"] * 4)
-        self.assertTrue(all(mode == "today" for _, mode in batch[4:]))
+        self.assertEqual([mode for _, mode in batch[:2]], ["live"] * 2)
+        self.assertTrue(all(mode == "today" for _, mode in batch[2:]))
 
     def test_more_details_rotate_to_unseen_fixtures_without_live_starvation(self):
         games = [({"GID": f"today-{index}"}, "today") for index in range(24)]
@@ -51,8 +51,8 @@ class EventFilterTests(unittest.TestCase):
         second_keys = {(game["GID"], mode) for game, mode in second}
 
         self.assertFalse(first_keys & second_keys)
-        self.assertEqual(sum(mode == "live" for _, mode in second), 4)
-        self.assertEqual(sum(mode == "today" for _, mode in second), 8)
+        self.assertEqual(sum(mode == "live" for _, mode in second), 2)
+        self.assertEqual(sum(mode == "today" for _, mode in second), 4)
 
     def test_on_demand_event_details_update_only_the_selected_fixture(self):
         previous_state = copy.deepcopy(crown_runtime.state)
@@ -266,7 +266,7 @@ class EventFilterTests(unittest.TestCase):
                 diagnostics["consecutive_failures"] = failures
                 crown_runtime.state["diagnostics"] = diagnostics
             delays.append(app._crown_retry_delay({"ok": False, "reason": "upstream_timeout"}))
-        self.assertEqual(delays, [10, 20, 40, 60, 60])
+        self.assertEqual(delays, [4, 8, 16, 30, 30])
 
     def test_excludes_special_betting_marker_but_keeps_regular_league(self):
         self.assertTrue(is_excluded_league("阿根廷职业联赛-特别投注"))

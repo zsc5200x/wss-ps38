@@ -40,6 +40,9 @@ class CrownApiTests(unittest.TestCase):
         self.assertEqual(headers["Location"], "/crown")
         self.assertEqual(body, "")
 
+    def test_session_conflict_retry_is_fast(self):
+        self.assertEqual(app._crown_retry_delay({"ok": False, "reason": "session_conflict"}), 5)
+
     def test_crown_page_has_only_crown_data(self):
         status, headers, body = self.request("GET", "/crown")
         self.assertEqual(status, 200)

@@ -6,14 +6,8 @@
   const POLL_INTERVAL = 1400;
 
   const dom = {
-    connectionPill: $("connectionPill"),
-    connectionText: $("connectionText"),
-    lastCapture: $("lastCapture"),
-    telemetrySource: $("telemetrySource"),
     primaryNav: $("primaryNav"),
     pagePanels: [...document.querySelectorAll("[data-page-panel]")],
-    pauseButton: $("pauseButton"),
-    refreshButton: $("refreshButton"),
     crownFrames: [...document.querySelectorAll("[data-crown-frame]")],
     metadataMaintenance: $("metadataMaintenance"),
     metadataCheckButton: $("metadataCheckButton"),
@@ -81,6 +75,60 @@
     oddsBoard: $("oddsBoard"),
     sourceText: $("sourceText"),
     toast: $("toast"),
+    mergeRefreshButton: $("mergeRefreshButton"),
+    mergePinnacleCount: $("mergePinnacleCount"),
+    mergeCrownCount: $("mergeCrownCount"),
+    mergeSourceButtons: document.querySelectorAll("[data-merge-source]"),
+    mergeMappedCount: $("mergeMappedCount"),
+    mergePendingCount: $("mergePendingCount"),
+    mergeSearch: $("mergeSearch"),
+    mergeFilters: document.querySelector(".merge-filters"),
+    mergeError: $("mergeError"),
+    mergeLoading: $("mergeLoading"),
+    mergeEmpty: $("mergeEmpty"),
+    mergeCrownOptions: $("mergeCrownOptions"),
+    mergePinnacleOptions: $("mergePinnacleOptions"),
+    mergeGroups: $("mergeGroups"),
+    mergePinnacleLeagueOptions: $("mergePinnacleLeagueOptions"),
+    settingsPage: $("settingsPage"),
+    settingsSaveStatus: $("settingsSaveStatus"),
+    settingsRefreshButton: $("settingsRefreshButton"),
+    settingsSaveButton: $("settingsSaveButton"),
+    settingsRestartNotice: $("settingsRestartNotice"),
+    settingsStatusUpdated: $("settingsStatusUpdated"),
+    settingsDashboardState: $("settingsDashboardState"),
+    settingsDashboardDetail: $("settingsDashboardDetail"),
+    settingsDataState: $("settingsDataState"),
+    settingsDataDetail: $("settingsDataDetail"),
+    settingsDatabaseState: $("settingsDatabaseState"),
+    settingsDatabaseDetail: $("settingsDatabaseDetail"),
+    settingsMetadataState: $("settingsMetadataState"),
+    settingsMetadataDetail: $("settingsMetadataDetail"),
+    settingsDefaultPage: $("settingsDefaultPage"),
+    settingsDefaultSort: $("settingsDefaultSort"),
+    settingsDefaultFilter: $("settingsDefaultFilter"),
+    settingsDefaultHistory: $("settingsDefaultHistory"),
+    settingsChangeLimit: $("settingsChangeLimit"),
+    settingsPresenceInterval: $("settingsPresenceInterval"),
+    settingsSnapshotInterval: $("settingsSnapshotInterval"),
+    settingsRotationMb: $("settingsRotationMb"),
+    settingsCompressAfter: $("settingsCompressAfter"),
+    settingsCompressMin: $("settingsCompressMin"),
+    settingsBackupKeep: $("settingsBackupKeep"),
+    settingsCapturePath: $("settingsCapturePath"),
+    settingsDatabasePath: $("settingsDatabasePath"),
+    settingsBackupPath: $("settingsBackupPath"),
+    settingsMaintenanceSummary: $("settingsMaintenanceSummary"),
+    settingsMaintenanceDetail: $("settingsMaintenanceDetail"),
+    settingsMetadataCheckButton: $("settingsMetadataCheckButton"),
+    settingsMetadataRepairButton: $("settingsMetadataRepairButton"),
+    settingsBackupButton: $("settingsBackupButton"),
+    settingsIntegrityButton: $("settingsIntegrityButton"),
+    settingsMaintenanceResult: $("settingsMaintenanceResult"),
+    settingsCdpUrl: $("settingsCdpUrl"),
+    settingsTargetHosts: $("settingsTargetHosts"),
+    settingsChromeProfile: $("settingsChromeProfile"),
+    settingsStartUrl: $("settingsStartUrl"),
   };
 
   const state = {
@@ -89,19 +137,13 @@
     selectedEvent: null,
     odds: [],
     changes: [],
+    changeLimit: 8,
     filter: "all",
     search: "",
     sort: "stable",
     collapsedLeagues: new Set(),
     collapsedScopes: { live: false, today: false },
     market: "all",
-    paused: false,
-    crownPaused: false,
-    crownStatus: "检查中",
-    crownError: null,
-    crownCached: false,
-    crownUpdatedAt: null,
-    crownEventCount: 0,
     refreshing: false,
     failures: 0,
     snapshot: null,
@@ -125,6 +167,38 @@
     metadataRequesting: false,
     metadataWasRunning: false,
     currentPage: "home",
+    settings: {
+      config: {},
+      defaults: {},
+      restartRequired: [],
+      loading: false,
+      saving: false,
+      initialized: false,
+    },
+    merge: {
+      data: null,
+      loading: false,
+      error: "",
+      source: "crown",
+      filter: "all",
+      search: "",
+      openLeagueBySource: { crown: "", pinnacle: "" },
+      editingLeagueIds: new Set(),
+      lastFetchAt: 0,
+      requestSerial: 0,
+      selectedCrownByPinnacle: new Map(),
+      selectedPinnacleByCrown: new Map(),
+      selectedPinnacleLeagueByCrown: new Map(),
+      leagueSavingCrownIds: new Set(),
+      leagueOptionByValue: new Map(),
+      leagueOptionsData: null,
+      editingPinnacleIds: new Set(),
+      optionByValue: new Map(),
+      optionsData: null,
+      pinnacleOptionByValue: new Map(),
+      pinnacleOptionsData: null,
+      savingPinnacleIds: new Set(),
+    },
   };
 
   function el(tag, className = "", text = "") {
@@ -661,8 +735,269 @@
     }, 3000);
   }
 
+  const SETTINGS_PREF_KEYS = {
+    page: "ps3838.dashboard.defaultPage",
+    sort: "ps3838.dashboard.defaultSort",
+    filter: "ps3838.dashboard.defaultFilter",
+    history: "ps3838.dashboard.defaultHistory",
+    changeLimit: "ps3838.dashboard.changeLimit",
+  };
+
+  function readPreference(key, fallback) {
+    try {
+      const value = window.localStorage.getItem(key);
+      return value === null ? fallback : value;
+    } catch (_error) {
+      return fallback;
+    }
+  }
+
+  function writePreference(key, value) {
+    try {
+      window.localStorage.setItem(key, String(value));
+    } catch (_error) {
+      // A restricted storage policy should not prevent the dashboard from working.
+    }
+  }
+
+  function loadSettingsPreferences() {
+    const page = resolvePage(readPreference(SETTINGS_PREF_KEYS.page, "home"));
+    state.sort = ["stable", "kickoff", "name"].includes(
+      readPreference(SETTINGS_PREF_KEYS.sort, "stable")
+    ) ? readPreference(SETTINGS_PREF_KEYS.sort, "stable") : "stable";
+    state.filter = ["all", "complete", "partial", "missing"].includes(
+      readPreference(SETTINGS_PREF_KEYS.filter, "all")
+    ) ? readPreference(SETTINGS_PREF_KEYS.filter, "all") : "all";
+    state.historyHours = [1, 6, 24, 168, 720].includes(
+      Number(readPreference(SETTINGS_PREF_KEYS.history, "24"))
+    ) ? Number(readPreference(SETTINGS_PREF_KEYS.history, "24")) : 24;
+    const requestedLimit = Number(readPreference(SETTINGS_PREF_KEYS.changeLimit, "8"));
+    state.changeLimit = [8, 12, 24].includes(requestedLimit) ? requestedLimit : 8;
+    return page;
+  }
+
+  function syncPreferenceControls() {
+    if (dom.sortSelect) dom.sortSelect.value = state.sort;
+    if (dom.historyRangeSelect) dom.historyRangeSelect.value = String(state.historyHours);
+    if (dom.settingsDefaultPage) dom.settingsDefaultPage.value = resolvePage(readPreference(SETTINGS_PREF_KEYS.page, "home"));
+    if (dom.settingsDefaultSort) dom.settingsDefaultSort.value = state.sort;
+    if (dom.settingsDefaultFilter) dom.settingsDefaultFilter.value = state.filter;
+    if (dom.settingsDefaultHistory) dom.settingsDefaultHistory.value = String(state.historyHours);
+    if (dom.settingsChangeLimit) dom.settingsChangeLimit.value = String(state.changeLimit);
+    for (const chip of dom.metadataFilters?.querySelectorAll("[data-filter]") || []) {
+      chip.classList.toggle("active", chip.dataset.filter === state.filter);
+    }
+  }
+
+  function saveSettingsPreferences() {
+    writePreference(SETTINGS_PREF_KEYS.page, dom.settingsDefaultPage?.value || "home");
+    writePreference(SETTINGS_PREF_KEYS.sort, dom.settingsDefaultSort?.value || "stable");
+    writePreference(SETTINGS_PREF_KEYS.filter, dom.settingsDefaultFilter?.value || "all");
+    writePreference(SETTINGS_PREF_KEYS.history, dom.settingsDefaultHistory?.value || "24");
+    writePreference(SETTINGS_PREF_KEYS.changeLimit, dom.settingsChangeLimit?.value || "8");
+  }
+
+  function settingsConfigFromPayload(payload) {
+    if (!payload || typeof payload !== "object") return {};
+    if (payload.config && typeof payload.config === "object") return payload.config;
+    if (payload.effective && typeof payload.effective === "object") return payload.effective;
+    if (payload.settings && typeof payload.settings === "object") return payload.settings;
+    return payload;
+  }
+
+  function formatSettingsBytes(value) {
+    const bytes = Number(value);
+    if (!Number.isFinite(bytes) || bytes < 0) return "--";
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+    return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  }
+
+  function settingsValue(value, fallback = "") {
+    return value === null || value === undefined || value === "" ? fallback : value;
+  }
+
+  function renderSettingsStatusFromSnapshot(snapshot = state.snapshot) {
+    const source = snapshot?.source || {};
+    const stats = snapshot?.stats || {};
+    const freshness = snapshot?.freshness || "no-data";
+    const freshnessLabel = {
+      live: "实时",
+      delayed: "延迟",
+      stale: "停止",
+      "no-data": "无数据",
+    }[freshness] || "未知";
+    if (dom.settingsDashboardState) {
+      dom.settingsDashboardState.textContent = "运行中";
+      dom.settingsDashboardState.className = "settings-state-good";
+      dom.settingsDashboardDetail.textContent = `接口正常 · ${formatClock(snapshot?.serverTime)}`;
+    }
+    if (dom.settingsDataState) {
+      dom.settingsDataState.textContent = freshnessLabel;
+      dom.settingsDataState.className = freshness === "live" ? "settings-state-good" : "settings-state-warn";
+      dom.settingsDataDetail.textContent = source.lastCapturedAt
+        ? `最近采集 ${formatShortDate(source.lastCapturedAt)} · 延迟 ${formatDuration(snapshot?.lagSeconds)}`
+        : "尚未收到采集数据";
+    }
+    if (dom.settingsDatabaseState) {
+      const errors = Number(source.databaseErrors || 0);
+      dom.settingsDatabaseState.textContent = errors ? `异常 ${errors} 次` : "正常";
+      dom.settingsDatabaseState.className = errors ? "settings-state-warn" : "settings-state-good";
+      dom.settingsDatabaseDetail.textContent = `${formatSettingsBytes(source.databaseBytes)} · 历史 ${numberFormatter.format(source.persistedPoints || 0)} 点`;
+    }
+    if (dom.settingsMetadataState) {
+      const missing = Number(stats.missing || 0);
+      const partial = Number(stats.partial || 0);
+      dom.settingsMetadataState.textContent = missing ? `缺失 ${numberFormatter.format(missing)}` : "完整";
+      dom.settingsMetadataState.className = missing ? "settings-state-warn" : "settings-state-good";
+      dom.settingsMetadataDetail.textContent = `完整 ${numberFormatter.format(stats.complete || 0)} · 部分 ${numberFormatter.format(partial)}`;
+    }
+    if (dom.settingsStatusUpdated) {
+      dom.settingsStatusUpdated.textContent = snapshot?.serverTime
+        ? `更新于 ${formatClock(snapshot.serverTime)}`
+        : "等待状态";
+    }
+    if (dom.settingsCapturePath) dom.settingsCapturePath.textContent = settingsValue(source.capturePath, "--");
+    if (dom.settingsDatabasePath) dom.settingsDatabasePath.textContent = settingsValue(source.databasePath, "--");
+  }
+
+  function renderSettingsPayload(payload) {
+    const config = settingsConfigFromPayload(payload);
+    const defaults = payload?.defaults && typeof payload.defaults === "object" ? payload.defaults : {};
+    state.settings.config = { ...config };
+    state.settings.defaults = { ...defaults };
+    state.settings.restartRequired = Array.isArray(payload?.pendingRestart)
+      ? payload.pendingRestart
+      : payload?.changed && Array.isArray(payload?.restartRequired)
+        ? payload.restartRequired
+        : [];
+
+    const value = (key, fallback) => settingsValue(config[key], settingsValue(defaults[key], fallback));
+    if (dom.settingsPresenceInterval) dom.settingsPresenceInterval.value = value("presence_interval_seconds", 5);
+    if (dom.settingsSnapshotInterval) dom.settingsSnapshotInterval.value = value("snapshot_interval_seconds", 2);
+    if (dom.settingsRotationMb) dom.settingsRotationMb.value = String(value("capture_rotation_mb", 0));
+    if (dom.settingsCompressAfter) dom.settingsCompressAfter.value = value("capture_compress_after_hours", 24);
+    if (dom.settingsCompressMin) dom.settingsCompressMin.value = value("capture_compress_min_mb", 16);
+    if (dom.settingsBackupKeep) dom.settingsBackupKeep.value = value("backup_keep", 7);
+
+    const readonly = payload?.readonly && typeof payload.readonly === "object" ? payload.readonly : {};
+    const readonlyValue = (key, fallback = "--") => settingsValue(readonly[key], value(key, fallback));
+    if (dom.settingsCapturePath) dom.settingsCapturePath.textContent = readonlyValue("capture_path", dom.settingsCapturePath.textContent || "--");
+    if (dom.settingsDatabasePath) dom.settingsDatabasePath.textContent = readonlyValue("dashboard_db_path", dom.settingsDatabasePath.textContent || "--");
+    if (dom.settingsBackupPath) dom.settingsBackupPath.textContent = readonlyValue("backup_dir", "--");
+    if (dom.settingsCdpUrl) dom.settingsCdpUrl.textContent = readonlyValue("cdp_url", "--");
+    if (dom.settingsTargetHosts) {
+      const hosts = readonlyValue("target_hosts", []);
+      dom.settingsTargetHosts.textContent = Array.isArray(hosts) ? hosts.join("、") : String(hosts || "--");
+    }
+    if (dom.settingsChromeProfile) dom.settingsChromeProfile.textContent = readonlyValue("chrome_profile_dir", "--");
+    if (dom.settingsStartUrl) dom.settingsStartUrl.textContent = readonlyValue("start_url", "--");
+    if (dom.settingsSaveStatus) dom.settingsSaveStatus.textContent = payload?.message || "配置已读取";
+    if (dom.settingsRestartNotice) {
+      const pending = state.settings.restartRequired;
+      dom.settingsRestartNotice.classList.toggle("hidden", pending.length === 0);
+      dom.settingsRestartNotice.textContent = pending.length
+        ? `有 ${pending.length} 项配置需要重启后生效：${pending.join("、")}`
+        : "";
+    }
+    renderSettingsStatusFromSnapshot(state.snapshot);
+  }
+
+  async function fetchSettings(showError = false) {
+    if (state.settings.loading) return;
+    state.settings.loading = true;
+    if (dom.settingsSaveStatus) dom.settingsSaveStatus.textContent = "读取配置中…";
+    try {
+      const response = await fetch("/api/settings", { cache: "no-store" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+      renderSettingsPayload(payload);
+      state.settings.initialized = true;
+    } catch (error) {
+      if (dom.settingsSaveStatus) dom.settingsSaveStatus.textContent = "配置读取失败";
+      if (showError) showToast(`系统设置读取失败：${error.message || "请求失败"}`);
+    } finally {
+      state.settings.loading = false;
+    }
+  }
+
+  function collectSettingsForm() {
+    return {
+      presence_interval_seconds: Number(dom.settingsPresenceInterval?.value || 5),
+      snapshot_interval_seconds: Number(dom.settingsSnapshotInterval?.value || 2),
+      capture_rotation_mb: Number(dom.settingsRotationMb?.value || 0),
+      capture_compress_after_hours: Number(dom.settingsCompressAfter?.value || 24),
+      capture_compress_min_mb: Number(dom.settingsCompressMin?.value || 16),
+      backup_keep: Number(dom.settingsBackupKeep?.value || 7),
+    };
+  }
+
+  async function saveSettings() {
+    if (state.settings.saving) return;
+    const values = collectSettingsForm();
+    if (!Number.isFinite(values.presence_interval_seconds) || values.presence_interval_seconds < 5 || values.presence_interval_seconds > 60
+      || !Number.isFinite(values.snapshot_interval_seconds) || values.snapshot_interval_seconds < 0.1 || values.snapshot_interval_seconds > 10
+      || !Number.isFinite(values.capture_compress_after_hours) || values.capture_compress_after_hours < 0 || values.capture_compress_after_hours > 720
+      || !Number.isFinite(values.capture_compress_min_mb) || values.capture_compress_min_mb < 1 || values.capture_compress_min_mb > 1024
+      || !Number.isFinite(values.backup_keep) || values.backup_keep < 1 || values.backup_keep > 30) {
+      showToast("请检查采集与存储参数的范围");
+      return;
+    }
+    state.settings.saving = true;
+    if (dom.settingsSaveButton) dom.settingsSaveButton.disabled = true;
+    try {
+      const response = await fetch("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(values),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+      renderSettingsPayload(payload);
+      showToast(payload.message || "系统配置已保存");
+    } catch (error) {
+      showToast(`配置保存失败：${error.message || "请求失败"}`);
+      if (dom.settingsSaveStatus) dom.settingsSaveStatus.textContent = "保存失败";
+    } finally {
+      state.settings.saving = false;
+      if (dom.settingsSaveButton) dom.settingsSaveButton.disabled = false;
+    }
+  }
+
+  async function runSettingsMaintenance(action) {
+    const button = {
+      metadata: dom.settingsMetadataCheckButton,
+      repair: dom.settingsMetadataRepairButton,
+      backup: dom.settingsBackupButton,
+      integrity: dom.settingsIntegrityButton,
+    }[action];
+    if (button) button.disabled = true;
+    try {
+      if (action === "metadata" || action === "repair") {
+        const apply = action === "repair";
+        const result = await startMetadataSync(apply);
+        if (result?.message && dom.settingsMaintenanceResult) dom.settingsMaintenanceResult.textContent = result.message;
+      } else {
+        const endpoint = action === "backup" ? "/api/settings/backup" : "/api/settings/integrity";
+        const response = await fetch(endpoint, { method: "POST" });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+        const message = payload.message || (action === "backup" ? "数据库备份完成" : "SQLite 完整性检查通过");
+        if (dom.settingsMaintenanceResult) dom.settingsMaintenanceResult.textContent = message;
+        showToast(message);
+        await fetchSettings();
+      }
+    } catch (error) {
+      if (dom.settingsMaintenanceResult) dom.settingsMaintenanceResult.textContent = error.message || "维护操作失败";
+      showToast(`维护操作失败：${error.message || "请求失败"}`);
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
   function resolvePage(value) {
-    return ["home", "pinnacle", "crown"].includes(value) ? value : "home";
+    return ["home", "pinnacle", "crown", "my-events", "merge", "settings"].includes(value) ? value : "home";
   }
 
   function isCrownView(page = state.currentPage) {
@@ -692,25 +1027,796 @@
     );
   }
 
-  function postCrownCommand(command, payload = {}) {
-    postCrownCommandTo(activeCrownFrame(), command, payload);
-  }
-
   function syncCrownFrameActivity() {
     const activeFrame = activeCrownFrame();
     for (const frame of dom.crownFrames) {
       if (frame.dataset.loaded !== "true") continue;
       postCrownCommandTo(frame, "set-paused", {
-        paused: frame !== activeFrame || state.crownPaused,
+        paused: frame !== activeFrame,
       });
     }
   }
 
-  function updateRefreshControls() {
-    const paused = isCrownView() ? state.crownPaused : state.paused;
-    dom.pauseButton.setAttribute("aria-pressed", String(paused));
-    dom.pauseButton.setAttribute("aria-label", paused ? "继续自动刷新" : "暂停自动刷新");
-    dom.pauseButton.querySelector("span").textContent = paused ? "继续刷新" : "暂停刷新";
+  function mergeTeams(event) {
+    const home = String(event?.home || "").trim();
+    const away = String(event?.away || "").trim();
+    if (home || away) return [home, away];
+    const name = String(event?.name || "");
+    const parts = name.split(/\s+(?:VS\.?|V)\s+/i);
+    return parts.length > 1 ? [parts[0].trim(), parts.slice(1).join(" vs ").trim()] : [name.trim(), ""];
+  }
+
+  function mergeFixtureLabel(event) {
+    const [home, away] = mergeTeams(event);
+    return [home, away].filter(Boolean).join(" vs ") || "赛事名称待补全";
+  }
+
+  function mergeEventTime(event, source) {
+    const normalized = String(event?.normalizedKickoff || "").trim();
+    if (normalized) return normalized;
+    const raw = source === "crown" ? event?.startLabel : event?.kickoff;
+    return String(raw || "时间未知");
+  }
+
+  function mergeEventRawTime(event, source) {
+    const raw = source === "crown" ? event?.startLabel : event?.kickoff;
+    return String(raw || "").trim();
+  }
+
+  function mergeCrownOptionValue(event) {
+    const id = String(event?.id || "");
+    const leagueId = String(event?.leagueId || "");
+    const league = String(event?.league || "未命名联赛");
+    const kickoff = mergeEventTime(event, "crown");
+    return `${mergeFixtureLabel(event)} · ${league} · ${kickoff} · 赛事 ${id} · 联赛 ${leagueId || "--"}`;
+  }
+
+  function mergePinnacleOptionValue(event) {
+    const id = String(event?.id || "");
+    const leagueId = String(event?.leagueId || "");
+    const league = String(event?.league || "未命名联赛");
+    const kickoff = mergeEventTime(event, "pinnacle");
+    return `${mergeFixtureLabel(event)} · ${league} · ${kickoff} · 赛事 ${id} · 联赛 ${leagueId || "--"}`;
+  }
+
+  function mergeMappedByPinnacle(data) {
+    return new Map((data?.mappings || []).map((item) => [String(item.pinnacleId), item]));
+  }
+
+  function mergeCrownById(data) {
+    return new Map((data?.crownEvents || []).map((item) => [String(item.id), item]));
+  }
+
+  function mergeSourceBlock(source, event) {
+    const [home, away] = mergeTeams(event);
+    const isPinnacle = source === "pinnacle";
+    const idLabel = isPinnacle ? "赛事 ID" : "赛事 ID";
+    const leagueId = String(event?.leagueId || "--");
+    const eventId = String(event?.id || "--");
+    const sourceKind = isPinnacle ? "pinnacle" : "crown";
+    const time = mergeEventTime(event, sourceKind);
+    const rawTime = mergeEventRawTime(event, sourceKind);
+    const block = el("div", `merge-source merge-source-${source}`);
+    const top = el("div", "merge-source-top");
+    top.append(el("span", "merge-source-label", isPinnacle ? "平博" : "皇冠"));
+    top.append(el("span", "merge-source-league", String(event?.league || "未命名联赛")));
+    block.append(top);
+    block.append(el("strong", "merge-source-teams", [home, away].filter(Boolean).join(" vs ") || "赛事名称待补全"));
+    const details = el("div", "merge-source-details");
+    details.append(el("span", "merge-source-time", time));
+    if (rawTime && rawTime !== time) {
+      details.append(el("span", "merge-id-pair", `原始时间 ${rawTime}`));
+    }
+    details.append(el("span", "merge-id-pair", `${idLabel} ${eventId}`));
+    details.append(el("span", "merge-id-pair", `联赛 ID ${leagueId}`));
+    if (!isPinnacle && event?.score) details.append(el("span", "merge-id-pair", `比分 ${event.score}`));
+    if (!isPinnacle && event?.minute) details.append(el("span", "merge-id-pair", String(event.minute)));
+    block.append(details);
+    return block;
+  }
+
+  function mergeSuggestionReasons(suggestion) {
+    const reasons = Array.isArray(suggestion?.reasons) ? suggestion.reasons.filter(Boolean) : [];
+    if (reasons.length) return reasons.join(" · ");
+    const confidence = String(suggestion?.confidence || "");
+    return confidence === "high" ? "队名与赛事信息较接近" : "候选需人工核对";
+  }
+
+  function mergeRow(pinnacle, mappings, crownById, suggestions, availableCrownIds, optionsListId = "mergeCrownOptions") {
+    const pinnacleId = String(pinnacle.id);
+    const mapping = mappings.get(pinnacleId);
+    const mappedCrown = mapping
+      ? (crownById.get(String(mapping.crownId)) || mapping.crownSnapshot || null)
+      : null;
+    const editing = state.merge.editingPinnacleIds.has(pinnacleId);
+    const selectedCrownId = state.merge.selectedCrownByPinnacle.get(pinnacleId) || "";
+    const row = el("article", `merge-row${mapping ? " is-mapped" : " is-pending"}`);
+    row.dataset.pinnacleId = pinnacleId;
+    row.append(mergeSourceBlock("pinnacle", pinnacle));
+
+    const target = el("div", "merge-target");
+    if (mapping && mappedCrown && !editing) {
+      const heading = el("div", "merge-target-heading");
+      heading.append(el("span", "merge-status mapped", "已确认关联"));
+      target.append(heading, mergeSourceBlock("crown", mappedCrown));
+      const actions = el("div", "merge-row-actions");
+      const changeButton = el("button", "merge-action-button", "更换关联");
+      changeButton.type = "button";
+      changeButton.dataset.mergeAction = "edit";
+      changeButton.dataset.pinnacleId = pinnacleId;
+      actions.append(changeButton);
+      const unmapButton = el("button", "merge-action-button danger", "解除关联");
+      unmapButton.type = "button";
+      unmapButton.dataset.mergeAction = "unmap";
+      unmapButton.dataset.pinnacleId = pinnacleId;
+      unmapButton.disabled = state.merge.savingPinnacleIds.has(pinnacleId);
+      actions.append(unmapButton);
+      target.append(actions);
+      row.append(target);
+      return row;
+    }
+
+    const heading = el("div", "merge-target-heading");
+    heading.append(el("span", `merge-status ${mapping ? "pending" : "pending"}`, mapping ? "正在更换关联" : "待人工确认"));
+    if (mapping) {
+      const cancel = el("button", "merge-text-button", "取消");
+      cancel.type = "button";
+      cancel.dataset.mergeAction = "cancel-edit";
+      cancel.dataset.pinnacleId = pinnacleId;
+      heading.append(cancel);
+    }
+    target.append(heading);
+
+    const candidateBox = el("div", "merge-candidate-box");
+    const label = el("label", "merge-picker-label", "选择对应的皇冠赛事");
+    label.htmlFor = `merge-crown-picker-${pinnacleId}`;
+    candidateBox.append(label);
+
+    const rowSuggestions = (suggestions.get(pinnacleId) || [])
+      .filter((item) => availableCrownIds.has(String(item.crownId)))
+      .slice(0, 5);
+
+    const input = el("input", "merge-picker");
+    input.type = "search";
+    input.id = `merge-crown-picker-${pinnacleId}`;
+    input.setAttribute("list", optionsListId);
+    input.setAttribute("autocomplete", "off");
+    input.dataset.pinnacleId = pinnacleId;
+    const initialId = selectedCrownId || (mapping ? String(mapping.crownId) : "");
+    const initialEvent = crownById.get(initialId);
+    if (initialEvent) input.value = mergeCrownOptionValue(initialEvent);
+    const inputRow = el("div", "merge-picker-row");
+    inputRow.append(input);
+    const save = el("button", "button primary merge-confirm-button", mapping ? "保存关联" : "确认关联");
+    save.type = "button";
+    save.dataset.mergeAction = "map";
+    save.dataset.pinnacleId = pinnacleId;
+    save.disabled = !initialId || state.merge.savingPinnacleIds.has(pinnacleId);
+    inputRow.append(save);
+    candidateBox.append(inputRow);
+
+    const helper = el("div", "merge-picker-help");
+    helper.dataset.mergeHelp = pinnacleId;
+    helper.textContent = "可按队名、联赛或赛事 ID 搜索皇冠赛事；核对联赛和开赛时间后再确认。";
+    candidateBox.append(helper);
+
+    if (rowSuggestions.length) {
+      const suggestionList = el("div", "merge-suggestions");
+      suggestionList.append(el("span", "merge-suggestions-label", "候选"));
+      for (const suggestion of rowSuggestions.slice(0, 3)) {
+        const event = crownById.get(String(suggestion.crownId));
+        if (!event) continue;
+        const optionButton = el("button", "merge-suggestion", mergeFixtureLabel(event));
+        optionButton.type = "button";
+        optionButton.dataset.mergeAction = "choose";
+        optionButton.dataset.pinnacleId = pinnacleId;
+        optionButton.dataset.crownId = String(event.id);
+        optionButton.title = mergeSuggestionReasons(suggestion);
+        const score = Number(suggestion.score);
+        const scoreText = Number.isFinite(score) ? `评分 ${Math.round(score)}/100` : "候选";
+        optionButton.append(el("small", "merge-suggestion-score", scoreText));
+        suggestionList.append(optionButton);
+      }
+      if (suggestionList.children.length > 1) candidateBox.append(suggestionList);
+    }
+
+    target.append(candidateBox);
+    row.append(target);
+    return row;
+  }
+
+  function mergeCrownRow(crown, mappingsByCrown, pinnacleById, mappingsByPinnacle, suggestions, allowedPinnacleIds, optionsListId = "mergePinnacleOptions") {
+    const crownId = String(crown.id);
+    const mapping = mappingsByCrown.get(crownId);
+    const pinnacle = mapping
+      ? (pinnacleById.get(String(mapping.pinnacleId)) || mapping.pinnacleSnapshot || null)
+      : null;
+    const row = el("article", `merge-row merge-crown-row${mapping ? " is-mapped" : " is-pending"}`);
+    row.dataset.crownId = crownId;
+    row.append(mergeSourceBlock("crown", crown));
+
+    const target = el("div", "merge-target");
+    if (mapping && pinnacle) {
+      const heading = el("div", "merge-target-heading");
+      heading.append(el("span", "merge-status mapped", "已确认关联"));
+      target.append(heading, mergeSourceBlock("pinnacle", pinnacle));
+      const actions = el("div", "merge-row-actions");
+      const unmapButton = el("button", "merge-action-button danger", "解除关联");
+      unmapButton.type = "button";
+      unmapButton.dataset.mergeAction = "unmap";
+      unmapButton.dataset.pinnacleId = String(mapping.pinnacleId);
+      unmapButton.disabled = state.merge.savingPinnacleIds.has(String(mapping.pinnacleId));
+      actions.append(unmapButton);
+      target.append(actions);
+      row.append(target);
+      return row;
+    }
+
+    const heading = el("div", "merge-target-heading");
+    heading.append(el("span", "merge-status pending", "待人工确认"));
+    target.append(heading);
+
+    const candidateBox = el("div", "merge-candidate-box");
+    const label = el("label", "merge-picker-label", "选择对应的平博赛事");
+    label.htmlFor = `merge-pinnacle-picker-${crownId}`;
+    candidateBox.append(label);
+
+    const selectedPinnacleId = state.merge.selectedPinnacleByCrown.get(crownId) || "";
+    const selectedPinnacle = pinnacleById.get(selectedPinnacleId);
+    const input = el("input", "merge-picker merge-pinnacle-picker");
+    input.type = "search";
+    input.id = `merge-pinnacle-picker-${crownId}`;
+    input.setAttribute("list", optionsListId);
+    input.setAttribute("autocomplete", "off");
+    input.dataset.crownId = crownId;
+    if (selectedPinnacle) input.value = mergePinnacleOptionValue(selectedPinnacle);
+
+    const inputRow = el("div", "merge-picker-row");
+    inputRow.append(input);
+    const save = el("button", "button primary merge-confirm-button", "确认关联");
+    save.type = "button";
+    save.dataset.mergeAction = "map-from-crown";
+    save.dataset.crownId = crownId;
+    const selectedMapping = selectedPinnacleId ? mappingsByPinnacle.get(selectedPinnacleId) : null;
+    save.disabled = !selectedPinnacleId || (selectedMapping && String(selectedMapping.crownId) !== crownId)
+      || state.merge.savingPinnacleIds.has(selectedPinnacleId);
+    inputRow.append(save);
+    candidateBox.append(inputRow);
+
+    const helper = el("div", "merge-picker-help");
+    helper.dataset.mergeCrownHelp = crownId;
+    helper.textContent = selectedMapping && String(selectedMapping.crownId) !== crownId
+      ? "这场平博赛事已关联其他皇冠赛事，请先在平博视图解除原关联。"
+      : "可按队名、联赛或赛事 ID 搜索平博赛事；核对联赛和开赛时间后再确认。";
+    candidateBox.append(helper);
+
+    const rowSuggestions = (suggestions.get(crownId) || [])
+      .filter((item) => allowedPinnacleIds.has(String(item.pinnacleId)))
+      .filter((item) => !mappingsByPinnacle.has(String(item.pinnacleId)))
+      .slice(0, 3);
+    if (rowSuggestions.length) {
+      const suggestionList = el("div", "merge-suggestions");
+      suggestionList.append(el("span", "merge-suggestions-label", "候选平博赛事"));
+      for (const suggestion of rowSuggestions) {
+        const item = pinnacleById.get(String(suggestion.pinnacleId));
+        if (!item) continue;
+        const optionButton = el("button", "merge-suggestion", mergeFixtureLabel(item));
+        optionButton.type = "button";
+        optionButton.dataset.mergeAction = "choose-pinnacle";
+        optionButton.dataset.crownId = crownId;
+        optionButton.dataset.pinnacleId = String(item.id);
+        optionButton.title = mergeSuggestionReasons(suggestion);
+        const score = Number(suggestion.score);
+        const scoreText = Number.isFinite(score) ? `评分 ${Math.round(score)}/100` : "候选";
+        optionButton.append(el("small", "merge-suggestion-score", scoreText));
+        suggestionList.append(optionButton);
+      }
+      if (suggestionList.children.length) candidateBox.append(suggestionList);
+    }
+
+    target.append(candidateBox);
+    row.append(target);
+    return row;
+  }
+
+  function mergeLeagueOptionValue(league) {
+    return `${league.name} · 联赛 ID ${league.id} · ${league.eventCount} 场`;
+  }
+
+  function mergeLeaguesForSource(data, source, events) {
+    const provided = Array.isArray(data?.[source === "crown" ? "crownLeagues" : "pinnacleLeagues"])
+      ? data[source === "crown" ? "crownLeagues" : "pinnacleLeagues"]
+      : [];
+    const eventsByLeague = new Map();
+    for (const event of events) {
+      const id = String(event?.leagueId || "--");
+      if (!eventsByLeague.has(id)) eventsByLeague.set(id, []);
+      eventsByLeague.get(id).push(event);
+    }
+    if (provided.length) {
+      return provided.map((league) => {
+        const id = String(league?.id || "--");
+        const groupedEvents = eventsByLeague.get(id) || [];
+        return {
+          id,
+          name: String(league?.name || groupedEvents[0]?.league || "未命名联赛"),
+          eventCount: Number(league?.eventCount ?? groupedEvents.length),
+          events: groupedEvents,
+        };
+      }).filter((league) => league.events.length > 0);
+    }
+    return [...eventsByLeague.entries()].map(([id, groupedEvents]) => ({
+      id,
+      name: String(groupedEvents[0]?.league || "未命名联赛"),
+      eventCount: groupedEvents.length,
+      events: groupedEvents,
+    }));
+  }
+
+  function renderLeagueBinding(league, source, mapping, pairedLeague, suggestions) {
+    const section = el("div", `merge-league-binding${mapping ? " is-mapped" : " is-pending"}`);
+    const leagueId = String(league.id);
+    const crownLeagueId = source === "crown" ? leagueId : String(mapping?.crownId || "");
+    const editing = source === "crown" && state.merge.editingLeagueIds.has(leagueId);
+    const saving = source === "crown" && state.merge.leagueSavingCrownIds.has(leagueId);
+
+    if (mapping && pairedLeague && !editing) {
+      const summary = el("div", "merge-league-binding-summary");
+      summary.append(el("span", "merge-status mapped", "联赛已绑定"));
+      summary.append(el("strong", "merge-league-pair-name", `${pairedLeague.name} · ${source === "crown" ? "平博" : "皇冠"}联赛 ID ${pairedLeague.id}`));
+      if (source === "crown") {
+        const actions = el("div", "merge-league-actions");
+        const change = el("button", "merge-action-button", "更换联赛");
+        change.type = "button";
+        change.dataset.mergeAction = "edit-league";
+        change.dataset.crownLeagueId = leagueId;
+        actions.append(change);
+        const unmap = el("button", "merge-action-button danger", "解除联赛绑定");
+        unmap.type = "button";
+        unmap.dataset.mergeAction = "unmap-league";
+        unmap.dataset.crownLeagueId = leagueId;
+        unmap.disabled = saving;
+        actions.append(unmap);
+        summary.append(actions);
+      }
+      section.append(summary);
+    } else if (source === "pinnacle") {
+      section.append(el("span", "merge-status pending", "等待皇冠侧绑定联赛"));
+      section.append(el("span", "merge-league-binding-help", "请先在皇冠视图确认对应联赛，再展开比赛。"));
+    } else if (league.id === "--") {
+      section.append(el("span", "merge-status pending", "联赛 ID 缺失"));
+      section.append(el("span", "merge-league-binding-help", "缺少联赛 ID，暂时无法建立联赛映射。"));
+    } else {
+      const form = el("div", "merge-league-bind-form");
+      form.append(el("span", "merge-status pending", mapping ? "更换联赛绑定" : "待确认联赛"));
+      const label = el("label", "merge-picker-label", "选择对应的平博联赛");
+      const inputId = `merge-pinnacle-league-${encodeURIComponent(leagueId)}`;
+      label.htmlFor = inputId;
+      form.append(label);
+      const inputRow = el("div", "merge-picker-row");
+      const input = el("input", "merge-picker merge-league-picker");
+      input.type = "search";
+      input.id = inputId;
+      input.dataset.crownLeagueId = leagueId;
+      input.setAttribute("list", "mergePinnacleLeagueOptions");
+      input.setAttribute("autocomplete", "off");
+      const selectedId = state.merge.selectedPinnacleLeagueByCrown.get(leagueId)
+        || (mapping ? String(mapping.pinnacleId) : "");
+      const selected = selectedId
+        ? (state.merge.data?.pinnacleLeagues || []).find((item) => String(item.id) === selectedId)
+        : null;
+      if (selected) input.value = mergeLeagueOptionValue({
+        id: String(selected.id),
+        name: String(selected.name || "未命名联赛"),
+        eventCount: Number(selected.eventCount || 0),
+      });
+      inputRow.append(input);
+      const save = el("button", "button primary merge-confirm-button", mapping ? "保存联赛" : "确认联赛");
+      save.type = "button";
+      save.dataset.mergeAction = "map-league";
+      save.dataset.crownLeagueId = leagueId;
+      save.disabled = !selectedId || saving;
+      inputRow.append(save);
+      if (mapping) {
+        const cancel = el("button", "merge-action-button", "取消");
+        cancel.type = "button";
+        cancel.dataset.mergeAction = "cancel-edit-league";
+        cancel.dataset.crownLeagueId = leagueId;
+        inputRow.append(cancel);
+      }
+      form.append(inputRow);
+      const helper = el("div", "merge-picker-help");
+      helper.dataset.mergeLeagueHelp = leagueId;
+      helper.textContent = input.value
+        ? "请确认皇冠与平博的联赛对应正确，再绑定比赛。"
+        : "按联赛名或联赛 ID 搜索；可参考下方评分候选。";
+      form.append(helper);
+
+      const options = suggestions.slice(0, 3);
+      if (options.length) {
+        const suggestionsBox = el("div", "merge-suggestions merge-league-suggestions");
+        suggestionsBox.append(el("span", "merge-suggestions-label", "平博联赛候选"));
+        for (const candidate of options) {
+          const button = el("button", "merge-suggestion", `${candidate.name} · 联赛 ID ${candidate.id}`);
+          button.type = "button";
+          button.dataset.mergeAction = "choose-pinnacle-league";
+          button.dataset.crownLeagueId = leagueId;
+          button.dataset.pinnacleLeagueId = candidate.id;
+          button.title = (Array.isArray(candidate.reasons) ? candidate.reasons : []).join(" · ");
+          const score = Number(candidate.score);
+          button.append(el("small", "merge-suggestion-score", `评分 ${Number.isFinite(score) ? Math.round(score) : 0}/100`));
+          suggestionsBox.append(button);
+        }
+        form.append(suggestionsBox);
+      }
+      section.append(form);
+    }
+
+    return section;
+  }
+
+  function renderMergeLeagueGroup(league, source, context) {
+    const leagueId = String(league.id);
+    const isCrown = source === "crown";
+    const mapping = isCrown
+      ? context.leagueMappingsByCrown.get(leagueId)
+      : context.leagueMappingsByPinnacle.get(leagueId);
+    const pairedLeague = mapping
+      ? (isCrown
+        ? context.pinnacleLeagueById.get(String(mapping.pinnacleId)) || mapping.pinnacleSnapshot
+        : context.crownLeagueById.get(String(mapping.crownId)) || mapping.crownSnapshot)
+      : null;
+    const pairId = mapping ? String(isCrown ? mapping.pinnacleId : mapping.crownId) : "";
+    const counterpartEvents = pairId
+      ? (isCrown ? context.pinnacleEventsByLeague.get(pairId) : context.crownEventsByLeague.get(pairId)) || []
+      : [];
+    const open = state.merge.openLeagueBySource[source] === leagueId;
+    const section = el("section", `merge-league-group${open ? " is-open" : ""}`);
+    section.dataset.leagueId = leagueId;
+    section.dataset.source = source;
+    const sectionId = `merge-${source}-league-${encodeURIComponent(leagueId)}`;
+    section.id = sectionId;
+
+    const header = el("header", "merge-league-heading");
+    const toggle = el("button", "merge-league-heading-toggle", "");
+    toggle.type = "button";
+    toggle.dataset.mergeAction = "toggle-league-events";
+    toggle.dataset.source = source;
+    toggle.dataset.leagueId = leagueId;
+    toggle.setAttribute("aria-expanded", String(open));
+    toggle.setAttribute("aria-controls", `${sectionId}-events`);
+    toggle.disabled = !mapping;
+    const title = el("span", "merge-league-name", league.name);
+    toggle.append(title);
+    toggle.append(el("span", "merge-league-id", `${isCrown ? "皇冠" : "平博"}联赛 ID ${leagueId}`));
+    toggle.append(el("span", "merge-league-count", `${league.events.length} 场`));
+    if (mapping) toggle.append(el("span", "merge-status mapped merge-league-status", "已绑定"));
+    else toggle.append(el("span", "merge-status pending merge-league-status", "未绑定"));
+    toggle.append(el("span", "merge-league-chevron", open ? "收起" : "展开"));
+    header.append(toggle);
+    section.append(header);
+
+    const leagueCandidates = isCrown ? (context.leagueSuggestionsByCrown.get(leagueId) || []) : [];
+    section.append(renderLeagueBinding(league, source, mapping, pairedLeague, leagueCandidates));
+    if (mapping && pairId) {
+      const eventToggleRow = el("div", "merge-league-events-toggle-row");
+      const eventToggle = el("button", "merge-action-button merge-events-toggle", open ? "收起赛事" : `展开并绑定赛事 (${league.events.length})`);
+      eventToggle.type = "button";
+      eventToggle.dataset.mergeAction = "toggle-league-events";
+      eventToggle.dataset.source = source;
+      eventToggle.dataset.leagueId = leagueId;
+      eventToggle.setAttribute("aria-expanded", String(open));
+      eventToggleRow.append(eventToggle);
+      if (counterpartEvents.length) eventToggleRow.append(el("span", "merge-league-binding-help", `对应联赛内 ${counterpartEvents.length} 场赛事`));
+      section.append(eventToggleRow);
+    }
+
+    if (open && mapping && pairId) {
+      const list = el("div", "merge-league-events");
+      list.id = `${sectionId}-events`;
+      const listId = isCrown ? "mergePinnacleOptions" : "mergeCrownOptions";
+      const timeKey = isCrown ? "startLabel" : "kickoff";
+      league.events.sort((a, b) => String(a[timeKey] || "").localeCompare(String(b[timeKey] || "")));
+      for (const event of league.events) {
+        if (isCrown) {
+          list.append(mergeCrownRow(event, context.mappingsByCrown, context.pinnacleById,
+            context.mappingsByPinnacle, context.suggestionsByCrown,
+            new Set(counterpartEvents.map((item) => String(item.id))), listId));
+        } else {
+          const mappedCrownIds = new Set(counterpartEvents.map((item) => String(item.id)));
+          const availableCrownIds = new Set(counterpartEvents
+            .map((item) => String(item.id))
+            .filter((id) => !context.mappingsByCrown.has(id)));
+          if (context.mappingsByPinnacle.has(String(event.id))) {
+            availableCrownIds.add(String(context.mappingsByPinnacle.get(String(event.id)).crownId));
+          }
+          list.append(mergeRow(event, context.mappingsByPinnacle, context.crownById,
+            context.suggestionsByPinnacle, availableCrownIds, listId));
+        }
+      }
+      section.append(list);
+    }
+    return section;
+  }
+
+  function renderMergeWorkspace() {
+    const data = state.merge.data;
+    if (!dom.mergeGroups) return;
+    dom.mergeError.classList.toggle("hidden", !state.merge.error);
+    if (state.merge.error) dom.mergeError.textContent = state.merge.error;
+    dom.mergeLoading.classList.toggle("hidden", !state.merge.loading || Boolean(data));
+    if (!data) {
+      dom.mergeGroups.replaceChildren();
+      dom.mergeEmpty.classList.add("hidden");
+      return;
+    }
+    const pinnacleEvents = Array.isArray(data.pinnacleEvents) ? data.pinnacleEvents : [];
+    const crownEvents = Array.isArray(data.crownEvents) ? data.crownEvents : [];
+    const mappings = mergeMappedByPinnacle(data);
+    const mappingsByCrown = new Map((data.mappings || []).map((item) => [String(item.crownId), item]));
+    const leagueMappings = Array.isArray(data.leagueMappings) ? data.leagueMappings : [];
+    const leagueMappingsByCrown = new Map(leagueMappings.map((item) => [String(item.crownId), item]));
+    const leagueMappingsByPinnacle = new Map(leagueMappings.map((item) => [String(item.pinnacleId), item]));
+    const crownById = mergeCrownById(data);
+    const pinnacleById = new Map(pinnacleEvents.map((item) => [String(item.id), item]));
+    if (state.merge.optionsData !== data.crownEvents) {
+      state.merge.optionsData = data.crownEvents;
+      state.merge.optionByValue = new Map();
+      const options = [];
+      for (const event of crownEvents) {
+        const id = String(event?.id || "");
+        if (!id) continue;
+        const value = mergeCrownOptionValue(event);
+        state.merge.optionByValue.set(value, id);
+        const option = el("option");
+        option.value = value;
+        options.push(option);
+      }
+      dom.mergeCrownOptions.replaceChildren(...options);
+    }
+    if (state.merge.pinnacleOptionsData !== data.pinnacleEvents) {
+      state.merge.pinnacleOptionsData = data.pinnacleEvents;
+      state.merge.pinnacleOptionByValue = new Map();
+      const options = [];
+      for (const event of pinnacleEvents) {
+        const id = String(event?.id || "");
+        if (!id) continue;
+        const value = mergePinnacleOptionValue(event);
+        state.merge.pinnacleOptionByValue.set(value, id);
+        const option = el("option");
+        option.value = value;
+        options.push(option);
+      }
+      dom.mergePinnacleOptions.replaceChildren(...options);
+    }
+    const pinnacleLeagues = mergeLeaguesForSource(data, "pinnacle", pinnacleEvents);
+    const crownLeagues = mergeLeaguesForSource(data, "crown", crownEvents);
+    if (state.merge.leagueOptionsData !== data.pinnacleLeagues) {
+      state.merge.leagueOptionsData = data.pinnacleLeagues;
+      state.merge.leagueOptionByValue = new Map();
+      const options = [];
+      for (const league of pinnacleLeagues) {
+        const id = String(league.id || "");
+        if (!id || id === "--") continue;
+        const value = mergeLeagueOptionValue(league);
+        state.merge.leagueOptionByValue.set(value, id);
+        const option = el("option");
+        option.value = value;
+        options.push(option);
+      }
+      dom.mergePinnacleLeagueOptions?.replaceChildren(...options);
+    }
+    const suggestions = new Map();
+    const suggestionsByCrown = new Map();
+    for (const suggestion of data.suggestions || []) {
+      const id = String(suggestion.pinnacleId);
+      if (!suggestions.has(id)) suggestions.set(id, []);
+      suggestions.get(id).push(suggestion);
+      const crownId = String(suggestion.crownId);
+      if (!suggestionsByCrown.has(crownId)) suggestionsByCrown.set(crownId, []);
+      suggestionsByCrown.get(crownId).push(suggestion);
+    }
+    for (const list of suggestions.values()) {
+      list.sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
+    }
+    for (const list of suggestionsByCrown.values()) {
+      list.sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
+    }
+
+    dom.mergePinnacleCount.textContent = numberFormatter.format(pinnacleEvents.length);
+    dom.mergeCrownCount.textContent = numberFormatter.format(crownEvents.length);
+    dom.mergeMappedCount.textContent = numberFormatter.format(mappings.size);
+    const pendingCount = (state.merge.source === "crown" ? crownEvents.length : pinnacleEvents.length) - mappings.size;
+    dom.mergePendingCount.textContent = numberFormatter.format(Math.max(0, pendingCount));
+    for (const button of dom.mergeSourceButtons) {
+      const active = button.dataset.mergeSource === state.merge.source;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
+    }
+    dom.mergeLoading.classList.toggle("hidden", !state.merge.loading || Boolean(data));
+
+    const query = state.merge.search.trim().toLocaleLowerCase("zh-CN");
+    const source = state.merge.source;
+    const sourceEvents = source === "crown" ? crownEvents : pinnacleEvents;
+    const filtered = sourceEvents.filter((event) => {
+      const eventId = String(event.id);
+      const mapping = source === "crown" ? mappingsByCrown.get(eventId) : mappings.get(eventId);
+      const isMapped = Boolean(mapping);
+      if (state.merge.filter === "pending" && isMapped) return false;
+      if (state.merge.filter === "mapped" && !isMapped) return false;
+      if (!query) return true;
+      const pairedEvent = source === "crown"
+        ? (mapping ? pinnacleById.get(String(mapping.pinnacleId)) || mapping.pinnacleSnapshot : null)
+        : (mapping ? crownById.get(String(mapping.crownId)) || mapping.crownSnapshot : null);
+      const suggestionText = source === "crown"
+        ? (suggestionsByCrown.get(eventId) || [])
+          .map((item) => mergeFixtureLabel(pinnacleById.get(String(item.pinnacleId)) || {})).join(" ")
+        : (suggestions.get(eventId) || [])
+          .map((item) => mergeFixtureLabel(crownById.get(String(item.crownId)) || {})).join(" ");
+      const sourceTime = mergeEventTime(event, source);
+      const pairedSource = source === "crown" ? "pinnacle" : "crown";
+      const pairedTime = pairedEvent ? mergeEventTime(pairedEvent, pairedSource) : "";
+      const searchText = [event.id, event.leagueId, event.league, event.name, ...mergeTeams(event), sourceTime,
+        mergeEventRawTime(event, source),
+        mapping?.pinnacleId, mapping?.crownId, pairedEvent?.id, pairedEvent?.leagueId,
+        pairedEvent?.league, pairedEvent?.name, ...mergeTeams(pairedEvent || {}), pairedTime,
+        mergeEventRawTime(pairedEvent || {}, pairedSource), suggestionText]
+        .filter(Boolean).join(" ").toLocaleLowerCase("zh-CN");
+      return searchText.includes(query);
+    });
+
+    dom.mergeGroups.replaceChildren();
+    const sourceName = source === "crown" ? "皇冠" : "平博";
+    const hasData = sourceEvents.length > 0;
+    const noResults = !filtered.length;
+    dom.mergeEmpty.classList.toggle("hidden", hasData && !noResults);
+    if (!hasData) {
+      dom.mergeEmpty.textContent = `当前没有可显示的${sourceName}赛事。请确认${sourceName}数据已连接后刷新。`;
+      dom.mergeEmpty.classList.remove("hidden");
+      return;
+    }
+    if (noResults) {
+      dom.mergeEmpty.textContent = "没有符合当前搜索和筛选条件的赛事。";
+      dom.mergeEmpty.classList.remove("hidden");
+      return;
+    }
+
+    const filteredById = new Set(filtered.map((event) => String(event.id)));
+    const sourceLeagues = source === "crown" ? crownLeagues : pinnacleLeagues;
+    const leagues = sourceLeagues
+      .map((league) => ({ ...league, events: (league.events || []).filter((event) => filteredById.has(String(event.id))) }))
+      .filter((league) => league.events.length)
+      .sort((a, b) => a.name.localeCompare(b.name, "zh-CN") || String(a.id).localeCompare(String(b.id), "zh-CN"));
+    const context = {
+      leagueMappingsByCrown,
+      leagueMappingsByPinnacle,
+      crownLeagueById: new Map(crownLeagues.map((item) => [String(item.id), item])),
+      pinnacleLeagueById: new Map(pinnacleLeagues.map((item) => [String(item.id), item])),
+      crownEventsByLeague: new Map(crownLeagues.map((item) => [String(item.id), item.events || []])),
+      pinnacleEventsByLeague: new Map(pinnacleLeagues.map((item) => [String(item.id), item.events || []])),
+      leagueSuggestionsByCrown: new Map(),
+      mappingsByCrown,
+      mappingsByPinnacle: mappings,
+      crownById,
+      pinnacleById,
+      suggestionsByCrown,
+      suggestionsByPinnacle: suggestions,
+    };
+    for (const item of data.leagueSuggestions || []) {
+      const crownId = String(item.crownLeagueId || "");
+      if (!crownId) continue;
+      if (!context.leagueSuggestionsByCrown.has(crownId)) context.leagueSuggestionsByCrown.set(crownId, []);
+      context.leagueSuggestionsByCrown.get(crownId).push({
+        id: String(item.pinnacleLeagueId || ""),
+        name: context.pinnacleLeagueById.get(String(item.pinnacleLeagueId || ""))?.name
+          || String(item.pinnacleLeagueName || "未命名联赛"),
+        score: item.score,
+        reasons: item.reasons,
+      });
+    }
+    for (const list of context.leagueSuggestionsByCrown.values()) {
+      list.sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
+    }
+    for (const league of leagues) {
+      dom.mergeGroups.append(renderMergeLeagueGroup(league, source, context));
+    }
+  }
+
+  async function refreshMerge(force = false) {
+    if (!dom.mergeGroups || state.merge.loading) return;
+    if (!force && Date.now() - state.merge.lastFetchAt < 15000) return;
+    state.merge.loading = true;
+    state.merge.error = "";
+    const requestSerial = ++state.merge.requestSerial;
+    if (!state.merge.data) dom.mergeLoading.classList.remove("hidden");
+    try {
+      const response = await fetch("/api/merge", { cache: "no-store" });
+      const payload = await response.json();
+      if (!response.ok || payload?.ok === false) {
+        throw new Error(payload?.error || "赛事列表读取失败");
+      }
+      if (requestSerial !== state.merge.requestSerial) return;
+      state.merge.data = payload;
+      state.merge.error = payload.crownError
+        ? `皇冠赛事读取失败：${payload.crownError}`
+        : "";
+      state.merge.lastFetchAt = Date.now();
+      renderMergeWorkspace();
+    } catch (error) {
+      if (requestSerial !== state.merge.requestSerial) return;
+      state.merge.error = `读取赛事失败：${error.message || "请确认平博和皇冠服务正常后重试。"}`;
+      renderMergeWorkspace();
+    } finally {
+      if (requestSerial === state.merge.requestSerial) {
+        state.merge.loading = false;
+        dom.mergeLoading.classList.add("hidden");
+      }
+    }
+  }
+
+  async function saveMergeMapping(action, pinnacleId, crownId = "") {
+    const id = String(pinnacleId || "");
+    if (!id || state.merge.savingPinnacleIds.has(id)) return;
+    state.merge.savingPinnacleIds.add(id);
+    renderMergeWorkspace();
+    try {
+      const response = await fetch("/api/merge/mapping", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, pinnacleId: id, ...(action === "map" ? { crownId } : {}) }),
+      });
+      const payload = await response.json();
+      if (!response.ok || payload?.ok === false) {
+        throw new Error(payload?.error || "保存合并关系失败");
+      }
+      state.merge.selectedCrownByPinnacle.delete(id);
+      state.merge.editingPinnacleIds.delete(id);
+      state.merge.lastFetchAt = 0;
+      await refreshMerge(true);
+      showToast(action === "unmap" ? "已解除赛事关联" : "赛事关联已保存");
+    } catch (error) {
+      showToast(`保存失败：${error.message || "请重试"}`);
+    } finally {
+      state.merge.savingPinnacleIds.delete(id);
+      renderMergeWorkspace();
+    }
+  }
+
+  async function saveMergeLeagueMapping(action, crownLeagueId, pinnacleLeagueId = "") {
+    const crownId = String(crownLeagueId || "");
+    if (!crownId || state.merge.leagueSavingCrownIds.has(crownId)) return;
+    state.merge.leagueSavingCrownIds.add(crownId);
+    renderMergeWorkspace();
+    try {
+      const response = await fetch("/api/merge/league-mapping", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action,
+          crownLeagueId: crownId,
+          ...(action === "map" ? { pinnacleLeagueId: String(pinnacleLeagueId || "") } : {}),
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok || payload?.ok === false) {
+        throw new Error(payload?.error || "保存联赛绑定失败");
+      }
+      state.merge.selectedPinnacleLeagueByCrown.delete(crownId);
+      state.merge.editingLeagueIds.delete(crownId);
+      if (action === "map") {
+        state.merge.openLeagueBySource.crown = crownId;
+      } else if (state.merge.openLeagueBySource.crown === crownId) {
+        state.merge.openLeagueBySource.crown = "";
+      }
+      state.merge.lastFetchAt = 0;
+      await refreshMerge(true);
+      showToast(action === "unmap" ? "已解除联赛绑定" : "联赛绑定已保存，现在可以绑定赛事");
+    } catch (error) {
+      showToast(`保存失败：${error.message || "请重试"}`);
+    } finally {
+      state.merge.leagueSavingCrownIds.delete(crownId);
+      renderMergeWorkspace();
+    }
   }
 
   function showPage(page, updateLocation = true) {
@@ -732,15 +1838,24 @@
     }
     if (crownView) {
       ensureCrownFrameLoaded();
-      renderCrownTelemetry();
     } else {
-      setStatus(state.snapshot?.freshness || "no-data", state.paused);
+      setStatus(state.snapshot?.freshness || "no-data");
+      if (target === "settings") {
+        renderSettingsStatusFromSnapshot(state.snapshot);
+        fetchSettings();
+      }
     }
+    syncPreferenceControls();
+    if (target === "merge") refreshMerge();
     syncCrownFrameActivity();
-    updateRefreshControls();
-    document.title = target === "home"
-      ? "皇冠赛事"
-      : (target === "pinnacle" ? "平博数据" : "皇冠数据");
+    document.title = {
+      home: "皇冠赛事",
+      pinnacle: "平博数据",
+      crown: "皇冠数据",
+      "my-events": "我的赛事",
+      merge: "赛事合并",
+      settings: "系统设置",
+    }[target];
     if (updateLocation) {
       const nextHash = target === "home" ? "" : `#${target}`;
       history.replaceState(null, "", `${location.pathname}${location.search}${nextHash}`);
@@ -748,72 +1863,24 @@
     window.scrollTo(0, 0);
   }
 
-  function crownTelemetryKind() {
-    if (state.crownStatus === "已连接" && !state.crownError) return "live";
-    if (state.crownError || /需要重新登录|过期|冲突|未连接|失败/.test(state.crownStatus)) return "offline";
-    if (state.crownCached || /数据延迟|缓存数据/.test(state.crownStatus)) return "delayed";
-    return "loading";
-  }
-
-  function renderCrownTelemetry() {
-    if (!isCrownView()) return;
-    const kind = crownTelemetryKind();
-    const labels = {
-      live: "皇冠实时接收中",
-      delayed: state.crownCached ? "皇冠缓存数据" : "皇冠数据延迟",
-      offline: state.crownError === "session_conflict"
-        ? "皇冠重复登录"
-        : (state.crownError === "session_expired" ? "皇冠会话已过期" : "皇冠连接异常"),
-      loading: "连接皇冠中",
-    };
-    dom.connectionPill.className = `status-pill ${kind === "loading" ? "loading" : kind}`;
-    dom.connectionText.textContent = labels[kind];
-    dom.telemetrySource.textContent = `Crown Odds / ${state.crownEventCount} 场赛事`;
-    dom.lastCapture.textContent = state.crownUpdatedAt
-      ? formatClock(state.crownUpdatedAt)
-      : "--:--:--";
-  }
-
-  function setStatus(freshness, paused = false) {
-    if (isCrownView()) {
-      renderCrownTelemetry();
-      return;
-    }
-    dom.connectionPill.className = "status-pill";
+  function setStatus(freshness) {
     dom.latencyBadge.className = "micro-badge";
-    if (paused) {
-      dom.connectionPill.classList.add("delayed");
-      dom.latencyBadge.classList.add("delayed");
-      dom.connectionText.textContent = "刷新已暂停";
-      dom.latencyBadge.textContent = "暂停";
-      return;
-    }
     if (freshness === "offline") {
-      dom.connectionPill.classList.add("offline");
       dom.latencyBadge.classList.add("offline");
-      dom.connectionText.textContent = "看板服务离线";
       dom.latencyBadge.textContent = "离线";
       return;
     }
     if (freshness === "live") {
-      dom.connectionPill.classList.add("live");
       dom.latencyBadge.classList.add("live");
-      dom.connectionText.textContent = "实时接收中";
       dom.latencyBadge.textContent = "实时";
     } else if (freshness === "delayed") {
-      dom.connectionPill.classList.add("delayed");
       dom.latencyBadge.classList.add("delayed");
-      dom.connectionText.textContent = "数据轻微延迟";
       dom.latencyBadge.textContent = "延迟";
     } else if (freshness === "stale") {
-      dom.connectionPill.classList.add("stale");
       dom.latencyBadge.classList.add("stale");
-      dom.connectionText.textContent = "数据已停止更新";
       dom.latencyBadge.textContent = "停止";
     } else {
-      dom.connectionPill.classList.add("offline");
       dom.latencyBadge.classList.add("offline");
-      dom.connectionText.textContent = "等待数据";
       dom.latencyBadge.textContent = "无数据";
     }
   }
@@ -834,10 +1901,8 @@
     dom.metricQuality.textContent = `${quality.toFixed(1)}%`;
     dom.metricPartial.textContent = `部分 ${numberFormatter.format(stats.partial || 0)}`;
     dom.metricMessages.textContent = `消息 ${numberFormatter.format(stats.messages || 0)}`;
-    dom.lastCapture.textContent = formatClock(snapshot.source?.lastCapturedAt);
-    dom.telemetrySource.textContent = "PS3838 / Pinnacle Feed";
     dom.sourceText.textContent = snapshot.source?.capturePath || "capture.jsonl";
-    setStatus(snapshot.freshness, state.paused);
+    setStatus(snapshot.freshness);
   }
 
   function renderMetadataStatus(status) {
@@ -884,6 +1949,13 @@
       detail = `${detail} · ${formatShortDate(status.finishedAt)}`;
     }
     dom.metadataSyncDetail.textContent = detail;
+    if (dom.settingsMaintenanceSummary) dom.settingsMaintenanceSummary.textContent = summary;
+    if (dom.settingsMaintenanceDetail) dom.settingsMaintenanceDetail.textContent = detail;
+    if (dom.settingsMetadataState && !state.snapshot) {
+      dom.settingsMetadataState.textContent = missing ? `缺失 ${numberFormatter.format(missing)}` : "完整";
+      dom.settingsMetadataState.className = missing ? "settings-state-warn" : "settings-state-good";
+      dom.settingsMetadataDetail.textContent = running ? detail : `已处理 ${numberFormatter.format(processed)} 场`;
+    }
 
     const justFinished = state.metadataWasRunning && !running;
     state.metadataWasRunning = running;
@@ -922,13 +1994,13 @@
   }
 
   async function startMetadataSync(apply) {
-    if (state.metadataRequesting) return;
+    if (state.metadataRequesting) return null;
     const missing = Number(state.metadataStatus?.current?.missing || 0);
     if (apply && missing > 0) {
       const confirmed = window.confirm(
         `将为 ${numberFormatter.format(missing)} 场缺失赛事访问平博页面并写入 SQLite / events_list.csv。继续吗？`
       );
-      if (!confirmed) return;
+      if (!confirmed) return null;
     }
 
     state.metadataRequesting = true;
@@ -947,8 +2019,10 @@
       if (payload.status) renderMetadataStatus(payload.status);
       showToast(payload.message || (apply ? "已启动一键补全" : "已启动缺失检查"));
       await fetchMetadataStatus();
+      return payload;
     } catch (error) {
       showToast(`${apply ? "补全" : "检查"}任务启动失败：${error.message || "请求失败"}`);
+      throw error;
     } finally {
       state.metadataRequesting = false;
       const status = state.metadataStatus || {};
@@ -1046,7 +2120,7 @@
   function createEventItem(event) {
     const button = el("button", "event-item");
     button.type = "button";
-    button.dataset.eventId = event.id;
+    button.dataset.eventId = String(event.id);
     button.setAttribute("aria-pressed", String(event.id === state.eventId));
 
     const stateBox = el("span", "event-state");
@@ -1086,7 +2160,7 @@
       quotes,
       updated,
     };
-    state.eventNodes.set(event.id, button);
+    state.eventNodes.set(String(event.id), button);
     updateEventItem(button, event);
     return button;
   }
@@ -1638,7 +2712,7 @@
 
   function renderChanges(force = false) {
     const signature = state.changes
-      .slice(0, 8)
+      .slice(0, state.changeLimit)
       .map((change) => change.serial)
       .join("|");
     if (!force && signature === state.changesSignature) return;
@@ -1650,7 +2724,7 @@
       return;
     }
     const fragment = document.createDocumentFragment();
-    for (const change of state.changes.slice(0, 8)) {
+    for (const change of state.changes.slice(0, state.changeLimit)) {
       const card = el("button", "change-card");
       card.type = "button";
       card.dataset.eventId = change.eventId;
@@ -1696,12 +2770,12 @@
     renderChanges();
     renderOdds();
     renderHistoryControls();
+    renderSettingsStatusFromSnapshot(snapshot);
   }
 
   async function refresh(force = false) {
-    if ((state.paused && !force) || state.refreshing) return;
+    if (state.refreshing) return;
     state.refreshing = true;
-    dom.refreshButton.disabled = true;
     const controller = new AbortController();
     const timer = window.setTimeout(() => controller.abort(), 5000);
     try {
@@ -1718,12 +2792,11 @@
     } catch (error) {
       state.failures += 1;
       if (state.failures >= 2) {
-        setStatus("offline", state.paused);
+        setStatus("offline");
       }
       if (force) showToast(`刷新失败：${error.message || "无法连接看板服务"}`);
     } finally {
       window.clearTimeout(timer);
-      dom.refreshButton.disabled = false;
       state.refreshing = false;
     }
   }
@@ -1782,6 +2855,8 @@
     const button = event.target.closest("[data-filter]");
     if (!button) return;
     state.filter = button.dataset.filter;
+    writePreference(SETTINGS_PREF_KEYS.filter, state.filter);
+    if (dom.settingsDefaultFilter) dom.settingsDefaultFilter.value = state.filter;
     for (const chip of dom.metadataFilters.querySelectorAll("[data-filter]")) {
       chip.classList.toggle("active", chip === button);
     }
@@ -1790,6 +2865,8 @@
 
   dom.sortSelect.addEventListener("change", () => {
     state.sort = dom.sortSelect.value;
+    writePreference(SETTINGS_PREF_KEYS.sort, state.sort);
+    if (dom.settingsDefaultSort) dom.settingsDefaultSort.value = state.sort;
     renderEvents(true);
   });
 
@@ -1804,6 +2881,8 @@
 
   dom.historyRangeSelect.addEventListener("change", () => {
     state.historyHours = Number(dom.historyRangeSelect.value) || 24;
+    writePreference(SETTINGS_PREF_KEYS.history, state.historyHours);
+    if (dom.settingsDefaultHistory) dom.settingsDefaultHistory.value = String(state.historyHours);
     state.historyPoints = [];
     state.historySummary = null;
     state.historyLastFetch = 0;
@@ -1815,9 +2894,317 @@
     fetchHistory(true);
   });
 
+  dom.settingsDefaultPage?.addEventListener("change", () => {
+    writePreference(SETTINGS_PREF_KEYS.page, dom.settingsDefaultPage.value);
+  });
+
+  dom.settingsDefaultSort?.addEventListener("change", () => {
+    state.sort = dom.settingsDefaultSort.value;
+    writePreference(SETTINGS_PREF_KEYS.sort, state.sort);
+    if (dom.sortSelect) dom.sortSelect.value = state.sort;
+    renderEvents(true);
+  });
+
+  dom.settingsDefaultFilter?.addEventListener("change", () => {
+    state.filter = dom.settingsDefaultFilter.value;
+    writePreference(SETTINGS_PREF_KEYS.filter, state.filter);
+    for (const chip of dom.metadataFilters?.querySelectorAll("[data-filter]") || []) {
+      chip.classList.toggle("active", chip.dataset.filter === state.filter);
+    }
+    renderEvents(true);
+  });
+
+  dom.settingsDefaultHistory?.addEventListener("change", () => {
+    state.historyHours = Number(dom.settingsDefaultHistory.value) || 24;
+    writePreference(SETTINGS_PREF_KEYS.history, state.historyHours);
+    if (dom.historyRangeSelect) dom.historyRangeSelect.value = String(state.historyHours);
+    state.historyPoints = [];
+    state.historySummary = null;
+    state.historyLastFetch = 0;
+    clearHistoryChart();
+    fetchHistory(true);
+  });
+
+  dom.settingsChangeLimit?.addEventListener("change", () => {
+    state.changeLimit = Number(dom.settingsChangeLimit.value) || 8;
+    writePreference(SETTINGS_PREF_KEYS.changeLimit, state.changeLimit);
+    state.changesSignature = "";
+    renderChanges(true);
+  });
+
+  dom.settingsRefreshButton?.addEventListener("click", () => {
+    fetchSettings(true);
+    refresh(true);
+    fetchMetadataStatus(true);
+  });
+
+  dom.settingsSaveButton?.addEventListener("click", () => {
+    saveSettings();
+    saveSettingsPreferences();
+  });
+
+  dom.settingsMetadataCheckButton?.addEventListener("click", () => {
+    runSettingsMaintenance("metadata");
+  });
+
+  dom.settingsMetadataRepairButton?.addEventListener("click", () => {
+    runSettingsMaintenance("repair");
+  });
+
+  dom.settingsBackupButton?.addEventListener("click", () => {
+    runSettingsMaintenance("backup");
+  });
+
+  dom.settingsIntegrityButton?.addEventListener("click", () => {
+    runSettingsMaintenance("integrity");
+  });
+
   dom.primaryNav.addEventListener("click", (event) => {
     const button = event.target.closest("[data-page]");
     if (button) showPage(button.dataset.page);
+  });
+
+  dom.mergeRefreshButton?.addEventListener("click", () => {
+    refreshMerge(true);
+  });
+
+  for (const button of dom.mergeSourceButtons) {
+    button.addEventListener("click", () => {
+      state.merge.source = button.dataset.mergeSource === "pinnacle" ? "pinnacle" : "crown";
+      state.merge.search = "";
+      state.merge.filter = "all";
+      if (dom.mergeSearch) dom.mergeSearch.value = "";
+      for (const filter of dom.mergeFilters?.querySelectorAll("[data-merge-filter]") || []) {
+        const active = filter.dataset.mergeFilter === "all";
+        filter.classList.toggle("active", active);
+        filter.setAttribute("aria-pressed", String(active));
+      }
+      renderMergeWorkspace();
+    });
+  }
+
+  dom.mergeSearch?.addEventListener("input", () => {
+    state.merge.search = dom.mergeSearch.value;
+    const cursor = dom.mergeSearch.selectionStart;
+    renderMergeWorkspace();
+    dom.mergeSearch.focus();
+    if (cursor !== null) dom.mergeSearch.setSelectionRange(cursor, cursor);
+  });
+
+  dom.mergeFilters?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-merge-filter]");
+    if (!button) return;
+    state.merge.filter = button.dataset.mergeFilter;
+    for (const filter of dom.mergeFilters.querySelectorAll("[data-merge-filter]")) {
+      const active = filter === button;
+      filter.classList.toggle("active", active);
+      filter.setAttribute("aria-pressed", String(active));
+    }
+    renderMergeWorkspace();
+  });
+
+  dom.mergeGroups?.addEventListener("input", (event) => {
+    const leagueInput = event.target.closest(".merge-league-picker");
+    if (leagueInput) {
+      const crownLeagueId = String(leagueInput.dataset.crownLeagueId || "");
+      const selectedPinnacleLeagueId = state.merge.leagueOptionByValue.get(leagueInput.value.trim()) || "";
+      if (selectedPinnacleLeagueId) {
+        state.merge.selectedPinnacleLeagueByCrown.set(crownLeagueId, selectedPinnacleLeagueId);
+      } else {
+        state.merge.selectedPinnacleLeagueByCrown.delete(crownLeagueId);
+      }
+      const form = leagueInput.closest(".merge-league-bind-form");
+      const saveButton = form?.querySelector('[data-merge-action="map-league"]');
+      if (saveButton) saveButton.disabled = !selectedPinnacleLeagueId || state.merge.leagueSavingCrownIds.has(crownLeagueId);
+      const help = form?.querySelector("[data-merge-league-help]");
+      if (help) {
+        help.textContent = selectedPinnacleLeagueId
+          ? "请确认皇冠与平博的联赛对应正确，再绑定比赛。"
+          : leagueInput.value
+            ? "请从下拉候选中选择完整联赛，或继续输入关键词缩小列表。"
+            : "按联赛名或联赛 ID 搜索；可参考下方评分候选。";
+      }
+      return;
+    }
+    const input = event.target.closest("[data-pinnacle-id].merge-picker");
+    if (input) {
+      const id = input.dataset.pinnacleId;
+      const selectedCrownId = state.merge.optionByValue.get(input.value.trim()) || "";
+      const mappings = mergeMappedByPinnacle(state.merge.data);
+      const occupiedBy = selectedCrownId
+        ? [...mappings.values()].find((mapping) =>
+          String(mapping.crownId) === selectedCrownId && String(mapping.pinnacleId) !== id,
+        )
+        : null;
+      const canSelect = Boolean(selectedCrownId && !occupiedBy);
+      if (canSelect) state.merge.selectedCrownByPinnacle.set(id, selectedCrownId);
+      else state.merge.selectedCrownByPinnacle.delete(id);
+      const row = input.closest(".merge-row");
+      const saveButton = row?.querySelector('[data-merge-action="map"]');
+      if (saveButton) saveButton.disabled = !canSelect || state.merge.savingPinnacleIds.has(id);
+      const help = row?.querySelector(".merge-picker-help");
+      if (help) {
+        help.textContent = occupiedBy
+          ? "这场皇冠赛事已关联到另一场平博赛事，请选择其他候选。"
+          : input.value && !canSelect
+            ? "请从下拉候选中选择完整赛事，或继续输入关键词缩小列表。"
+            : "可按队名、联赛或赛事 ID 搜索皇冠赛事；核对联赛和开赛时间后再确认。";
+      }
+      return;
+    }
+
+    const crownInput = event.target.closest("[data-crown-id].merge-pinnacle-picker");
+    if (!crownInput) return;
+    const crownId = crownInput.dataset.crownId;
+    const selectedPinnacleId = state.merge.pinnacleOptionByValue.get(crownInput.value.trim()) || "";
+    const mappings = mergeMappedByPinnacle(state.merge.data);
+    const occupiedBy = selectedPinnacleId ? mappings.get(selectedPinnacleId) : null;
+    const canSelect = Boolean(selectedPinnacleId && (!occupiedBy || String(occupiedBy.crownId) === crownId));
+    if (canSelect) state.merge.selectedPinnacleByCrown.set(crownId, selectedPinnacleId);
+    else state.merge.selectedPinnacleByCrown.delete(crownId);
+    const row = crownInput.closest(".merge-row");
+    const saveButton = row?.querySelector('[data-merge-action="map-from-crown"]');
+    if (saveButton) saveButton.disabled = !canSelect || state.merge.savingPinnacleIds.has(selectedPinnacleId);
+    const help = row?.querySelector("[data-merge-crown-help]");
+    if (help) {
+      help.textContent = occupiedBy
+        ? "这场平博赛事已关联其他皇冠赛事，请先在平博视图解除原关联。"
+        : crownInput.value && !canSelect
+          ? "请从下拉候选中选择完整赛事，或继续输入关键词缩小列表。"
+          : "可按队名、联赛或赛事 ID 搜索平博赛事；核对联赛和开赛时间后再确认。";
+    }
+  });
+
+  dom.mergeGroups?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-merge-action]");
+    if (!button) return;
+    const pinnacleId = String(button.dataset.pinnacleId || "");
+    const action = button.dataset.mergeAction;
+    if (action === "toggle-league-events") {
+      const source = button.dataset.source === "pinnacle" ? "pinnacle" : "crown";
+      const leagueId = String(button.dataset.leagueId || "");
+      const mapping = source === "crown"
+        ? new Map((state.merge.data?.leagueMappings || []).map((item) => [String(item.crownId), item])).get(leagueId)
+        : new Map((state.merge.data?.leagueMappings || []).map((item) => [String(item.pinnacleId), item])).get(leagueId);
+      if (!mapping) return;
+      state.merge.openLeagueBySource[source] = state.merge.openLeagueBySource[source] === leagueId ? "" : leagueId;
+      renderMergeWorkspace();
+      return;
+    }
+    if (action === "choose-pinnacle-league") {
+      const crownLeagueId = String(button.dataset.crownLeagueId || "");
+      const pinnacleLeagueId = String(button.dataset.pinnacleLeagueId || "");
+      const league = (state.merge.data?.pinnacleLeagues || []).find((item) => String(item.id) === pinnacleLeagueId);
+      if (crownLeagueId && pinnacleLeagueId) {
+        state.merge.selectedPinnacleLeagueByCrown.set(crownLeagueId, pinnacleLeagueId);
+        renderMergeWorkspace();
+        const picker = document.getElementById(`merge-pinnacle-league-${encodeURIComponent(crownLeagueId)}`);
+        if (picker && league) {
+          picker.value = mergeLeagueOptionValue(league);
+          picker.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+      }
+      return;
+    }
+    if (action === "edit-league") {
+      const crownLeagueId = String(button.dataset.crownLeagueId || "");
+      state.merge.editingLeagueIds.add(crownLeagueId);
+      renderMergeWorkspace();
+      return;
+    }
+    if (action === "cancel-edit-league") {
+      const crownLeagueId = String(button.dataset.crownLeagueId || "");
+      state.merge.editingLeagueIds.delete(crownLeagueId);
+      state.merge.selectedPinnacleLeagueByCrown.delete(crownLeagueId);
+      renderMergeWorkspace();
+      return;
+    }
+    if (action === "map-league") {
+      const crownLeagueId = String(button.dataset.crownLeagueId || "");
+      const pinnacleLeagueId = state.merge.selectedPinnacleLeagueByCrown.get(crownLeagueId) || "";
+      if (!pinnacleLeagueId) {
+        showToast("请先选择对应的平博联赛");
+        return;
+      }
+      saveMergeLeagueMapping("map", crownLeagueId, pinnacleLeagueId);
+      return;
+    }
+    if (action === "unmap-league") {
+      saveMergeLeagueMapping("unmap", String(button.dataset.crownLeagueId || ""));
+      return;
+    }
+    if (action === "edit") {
+      state.merge.editingPinnacleIds.add(pinnacleId);
+      renderMergeWorkspace();
+      return;
+    }
+    if (action === "cancel-edit") {
+      state.merge.editingPinnacleIds.delete(pinnacleId);
+      state.merge.selectedCrownByPinnacle.delete(pinnacleId);
+      renderMergeWorkspace();
+      return;
+    }
+    if (action === "unmap") {
+      saveMergeMapping("unmap", pinnacleId);
+      return;
+    }
+    if (action === "choose") {
+      const crownId = String(button.dataset.crownId || "");
+      state.merge.selectedCrownByPinnacle.set(pinnacleId, crownId);
+      renderMergeWorkspace();
+      const picker = document.getElementById(`merge-crown-picker-${pinnacleId}`);
+      const crown = mergeCrownById(state.merge.data).get(crownId);
+      if (picker && crown) {
+        picker.value = mergeCrownOptionValue(crown);
+        picker.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      return;
+    }
+    if (action === "choose-pinnacle") {
+      const crownId = String(button.dataset.crownId || "");
+      const pinnacleId = String(button.dataset.pinnacleId || "");
+      state.merge.selectedPinnacleByCrown.set(crownId, pinnacleId);
+      renderMergeWorkspace();
+      const picker = document.getElementById(`merge-pinnacle-picker-${crownId}`);
+      const pinnacle = new Map((state.merge.data?.pinnacleEvents || []).map((item) => [String(item.id), item])).get(pinnacleId);
+      if (picker && pinnacle) {
+        picker.value = mergePinnacleOptionValue(pinnacle);
+        picker.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      return;
+    }
+    if (action === "map") {
+      const crownId = state.merge.selectedCrownByPinnacle.get(pinnacleId) || "";
+      if (!crownId) {
+        showToast("请先从候选列表中选择一场皇冠赛事");
+        return;
+      }
+      const occupied = [...mergeMappedByPinnacle(state.merge.data).values()].some((mapping) =>
+        String(mapping.crownId) === crownId && String(mapping.pinnacleId) !== pinnacleId,
+      );
+      if (occupied) {
+        showToast("这场皇冠赛事已关联到另一场平博赛事，请刷新后重新选择");
+        state.merge.selectedCrownByPinnacle.delete(pinnacleId);
+        renderMergeWorkspace();
+        return;
+      }
+      saveMergeMapping("map", pinnacleId, crownId);
+      return;
+    }
+    if (action === "map-from-crown") {
+      const crownId = String(button.dataset.crownId || "");
+      const pinnacleId = state.merge.selectedPinnacleByCrown.get(crownId) || "";
+      if (!pinnacleId) {
+        showToast("请先从候选列表中选择一场平博赛事");
+        return;
+      }
+      const existing = mergeMappedByPinnacle(state.merge.data).get(pinnacleId);
+      if (existing && String(existing.crownId) !== crownId) {
+        showToast("这场平博赛事已关联其他皇冠赛事，请先在平博视图解除原关联");
+        return;
+      }
+      saveMergeMapping("map", pinnacleId, crownId);
+    }
   });
 
   window.addEventListener("hashchange", () => {
@@ -1836,59 +3223,22 @@
     renderOdds();
   });
 
-  dom.pauseButton.addEventListener("click", () => {
-    if (isCrownView()) {
-      state.crownPaused = !state.crownPaused;
-      postCrownCommand("set-paused", { paused: state.crownPaused });
-      updateRefreshControls();
-      showToast(state.crownPaused ? "已暂停皇冠自动刷新" : "已恢复皇冠自动刷新");
-      return;
-    }
-    state.paused = !state.paused;
-    updateRefreshControls();
-    setStatus(state.snapshot?.freshness || "no-data", state.paused);
-    if (!state.paused) refresh(true);
-    showToast(state.paused ? "已暂停自动刷新" : "已恢复自动刷新");
-  });
-
-  dom.refreshButton.addEventListener("click", () => {
-    if (isCrownView()) {
-      postCrownCommand("refresh");
-      showToast("正在刷新皇冠数据");
-      return;
-    }
-    refresh(true);
-  });
-
-  window.addEventListener("message", (event) => {
-    const fromCrownFrame = dom.crownFrames.some(
-      (frame) => frame.contentWindow === event.source,
-    );
-    if (event.origin !== location.origin || !fromCrownFrame) return;
-    const data = event.data || {};
-    if (data.type !== "crown:state") return;
-    const activeFrame = activeCrownFrame();
-    if (event.source === activeFrame?.contentWindow) {
-      state.crownPaused = Boolean(data.paused);
-    }
-    state.crownStatus = String(data.status || "检查中");
-    state.crownError = data.error || null;
-    state.crownCached = Boolean(data.cached);
-    state.crownUpdatedAt = data.updatedAt || null;
-    state.crownEventCount = Number(data.eventCount || 0);
-    if (isCrownView()) {
-      updateRefreshControls();
-      renderCrownTelemetry();
-    }
-  });
-
   for (const frame of dom.crownFrames) {
     frame.addEventListener("load", () => {
       postCrownCommandTo(frame, "set-paused", {
-        paused: frame !== activeCrownFrame() || state.crownPaused,
+        paused: frame !== activeCrownFrame(),
       });
     });
   }
+
+  window.addEventListener("message", (event) => {
+    const activeFrame = activeCrownFrame();
+    if (event.source === activeFrame?.contentWindow) {
+      // Keep iframe messages scoped to the active Crown view. The parent no
+      // longer exposes manual pause/refresh controls, so there is no UI state
+      // to mirror here.
+    }
+  });
 
   dom.metadataCheckButton.addEventListener("click", () => {
     startMetadataSync(false);
@@ -1900,18 +3250,22 @@
 
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) {
-      if (!state.paused) refresh();
+      refresh();
       fetchMetadataStatus();
     }
   });
 
-  showPage(resolvePage(location.hash.slice(1)), false);
+  const preferredPage = loadSettingsPreferences();
+  const initialPage = location.hash.slice(1) ? resolvePage(location.hash.slice(1)) : preferredPage;
+  showPage(initialPage, false);
+  syncPreferenceControls();
   refresh(true);
   fetchMetadataStatus();
   window.setInterval(() => {
     if (!document.hidden) {
       refresh();
       fetchMetadataStatus();
+      if (state.currentPage === "merge") refreshMerge();
     }
   }, POLL_INTERVAL);
 })();

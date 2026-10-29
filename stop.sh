@@ -28,7 +28,7 @@ stop_one() {
         kill -KILL "$pid" 2>/dev/null || true
       fi
     else
-      echo "PID 文件 $pid_file 指向的进程不是 $script，已跳过。" >&2
+      echo "PID 文件 ${pid_file} 指向的进程不是 ${script}，已跳过。" >&2
     fi
   fi
 

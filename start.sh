@@ -199,6 +199,25 @@ start_one() {
   local pid_file="$RUN_DIR/$name.pid"
   local log_file="$LOG_DIR/$name.log"
 
+  # A stale PID file can leave a healthy dashboard running without a valid
+  # process record. Reconcile the fixed dashboard port before starting a
+  # second instance, otherwise the new process exits with EADDRINUSE.
+  if [[ "$name" == "dashboard" ]]; then
+    local port_pid=""
+    port_pid="$(lsof -nP -tiTCP:8787 -sTCP:LISTEN 2>/dev/null | head -n 1 || true)"
+    if [[ -n "$port_pid" ]]; then
+      local port_command=""
+      port_command="$(ps -p "$port_pid" -o command= 2>/dev/null || true)"
+      if [[ "$port_command" == *"$script"* ]]; then
+        echo "$port_pid" >"$pid_file"
+        echo "$name 已在运行，PID=$port_pid"
+        return 0
+      fi
+      echo "端口 8787 已被其他进程占用（PID=$port_pid），无法启动 $name。" >&2
+      return 1
+    fi
+  fi
+
   if is_running "$pid_file" "$script"; then
     echo "$name 已在运行，PID=$(cat "$pid_file")"
     return 0
@@ -223,6 +242,11 @@ start_one capture capture.py
 sleep 1
 CROWN_PYTHON_BIN="$CROWN_PYTHON_BIN" "$PROJECT_DIR/crown.sh"
 sleep 1
+if ! "$CROWN_PYTHON_BIN" "$PROJECT_DIR/crown/ensure_login_tab.py" \
+  --cdp-url "$CDP_URL" \
+  --service-url "http://127.0.0.1:8887"; then
+  echo "皇冠页面标签页未能打开；请查看皇冠服务状态后重试。" >&2
+fi
 start_one dashboard dashboard_server.py
 sleep 1
 start_one live_snapshot live_snapshot.py

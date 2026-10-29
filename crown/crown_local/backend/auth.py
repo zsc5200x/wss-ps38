@@ -32,6 +32,25 @@ def _origin(url):
     return parts.scheme.lower(), (parts.hostname or "").lower(), parts.port or (443 if parts.scheme == "https" else 80)
 
 
+def _canonical_origin(url):
+    """Return a credential-free origin suitable for a Crown session record."""
+    try:
+        scheme, host, port = _origin(url)
+        if scheme not in {"http", "https"} or not host:
+            return ""
+        hostname = f"[{host}]" if ":" in host else host
+        default_port = 443 if scheme == "https" else 80
+        return f"{scheme}://{hostname}" + (f":{port}" if port != default_port else "")
+    except (TypeError, ValueError):
+        return ""
+
+
+def _is_pinnacle_host(host):
+    host = (host or "").lower().rstrip(".")
+    return (host == "ps3838.com" or host.endswith(".ps3838.com")
+            or host == "pinnacle.com" or host.endswith(".pinnacle.com"))
+
+
 def _allow_insecure_certificate(account):
     """Allow legacy Crown IP endpoints whose HTTPS certificate is invalid.
 
@@ -414,6 +433,33 @@ class AuthService:
             context_args["storage_state"] = stored.get("storage_state", {"cookies": [], "origins": []})
         return browser.new_context(**context_args), True
 
+    def _shared_second_page(self, context, account, stored):
+        """Return one verified Crown tab, without relying on browser ordering."""
+        pages = list(getattr(context, "pages", []))
+        signed_pages = []
+        bound_pages = []
+        for page in pages:
+            try:
+                if page.is_closed():
+                    continue
+                scheme, host, _port = _origin(page.url)
+                if scheme != "https" or not host or _is_pinnacle_host(host):
+                    continue
+                signed_origin = self._signed_member_origin(page)
+                page_is_bound = self._page_matches_account(account, stored, page.url)
+                if (signed_origin and
+                        (_origin(signed_origin) == _origin(page.url) or page_is_bound)):
+                    signed_pages.append(page)
+                elif page_is_bound:
+                    bound_pages.append(page)
+            except Exception:
+                continue
+        if len(signed_pages) == 1:
+            return signed_pages[0]
+        if not signed_pages and len(bound_pages) == 1:
+            return bound_pages[0]
+        return None
+
     def _begin(self, account_id, restore=False, background=False):
         account = self._account(account_id)
         if not account.get("enabled", True):
@@ -458,7 +504,17 @@ class AuthService:
             return
         browser = self._launch(background=background)
         context, owns_context = self._acquire_context(browser, account, stored)
-        page = context.new_page()
+        reused_shared_page = False
+        adopted_origin = ""
+        page = None
+        if account["kind"] == "crown_odds" and self._browser_shared:
+            page = self._shared_second_page(context, account, existing_session)
+            if page is not None:
+                reused_shared_page = True
+                adopted_origin = (self._signed_member_origin(page)
+                                  or _canonical_origin(str(page.url or "")))
+        if page is None:
+            page = context.new_page()
         page.set_default_timeout(2500)
         page.set_default_navigation_timeout(8000 if background else 30000)
         page.route("**/*", lambda route: self._guard_destination(route, self._jobs.get(account_id)))
@@ -485,22 +541,29 @@ class AuthService:
                 self._dispose(account_id)
                 return
             login_url = self._member_resume_url(job) or login_url
-        job.navigation_url = login_url
+        if adopted_origin and not self._trusted_page(job, page.url):
+            # The verified shared Crown page is the source of truth. Its
+            # member host may differ from the configured entry domain.
+            job.member_origin = adopted_origin
+            job.member_protocol = {}
+            job.resume_url = ""
+        job.navigation_url = page.url if reused_shared_page and self._trusted_page(job, page.url) else login_url
         # Observe only Crown's own tab. Listening on the shared context would
         # also capture Pinnacle traffic and can persist the wrong cookies.
         page.on("framenavigated", lambda frame: self._observe_member_navigation(job, frame))
         page.on("request", lambda request: self._observe_member_request(job, request))
         page.on("response", lambda response: self._response(job, response))
-        for attempt in range(3):
-            try:
-                page.goto(login_url, wait_until="domcontentloaded")
-                page.wait_for_timeout(400)
-                break
-            except Exception as exc:
-                self._diagnostic(account_id, "open_page", exc)
-                if not self._transient_exception(exc) or attempt == 2:
-                    raise
-                page.wait_for_timeout(150 * (attempt + 1))
+        if not (reused_shared_page and self._trusted_page(job, page.url)):
+            for attempt in range(3):
+                try:
+                    page.goto(login_url, wait_until="domcontentloaded")
+                    page.wait_for_timeout(400)
+                    break
+                except Exception as exc:
+                    self._diagnostic(account_id, "open_page", exc)
+                    if not self._transient_exception(exc) or attempt == 2:
+                        raise
+                    page.wait_for_timeout(150 * (attempt + 1))
         if not self._trusted_page(job, page.url):
             if background:
                 self._fail(account_id, "后台会话检查尚未确认页面来源；已保留会话，稍后重试。")
@@ -727,25 +790,62 @@ class AuthService:
         return False
 
     def _sync_shared_member_tabs(self, account, stored):
-        """Inspect existing tabs in the shared Chrome without opening another."""
+        """Find a verified Crown page in shared Chrome, regardless of tab order."""
         try:
             browser = self._launch(background=True)
             context, _owns_context = self._acquire_context(browser, account, stored)
         except Exception as exc:
             self._diagnostic(account["id"], "check_page", exc)
             return "unavailable"
-        for page in list(getattr(context, "pages", [])):
+        pages = list(getattr(context, "pages", []))
+        signed_pages = []
+        bound_pages = []
+        for page in pages:
             try:
-                if page.is_closed() or not self._page_matches_account(account, stored, page.url):
+                if page.is_closed():
                     continue
+                scheme, host, _port = _origin(page.url)
+                if scheme != "https" or not host or _is_pinnacle_host(host):
+                    continue
+                signed_origin = self._signed_member_origin(page)
+                if signed_origin:
+                    signed_pages.append((page, signed_origin))
+                elif self._page_matches_account(account, stored, page.url):
+                    bound_pages.append((page, ""))
             except Exception:
                 continue
-            outcome = self._sync_member_page(account, context, page, stored)
-            if outcome in {"synced", "conflict", "save_error"}:
-                return outcome
-        return "not_signed_in"
 
-    def _sync_member_page(self, account, context, page, stored, retained=None):
+        # A visible Crown login is strong evidence for a rotating member host,
+        # but multiple signed-in candidates are ambiguous and must not be saved.
+        if len(signed_pages) > 1:
+            return "ambiguous"
+        candidates = signed_pages or bound_pages
+        if len(candidates) != 1:
+            return "not_signed_in"
+        page, adopted_origin = candidates[0]
+        return self._sync_member_page(
+            account, context, page, stored, adopted_origin=adopted_origin,
+        )
+
+    def _signed_member_origin(self, page):
+        """Return a new HTTPS origin only when a page visibly is Crown-signed-in."""
+        try:
+            page.set_default_timeout(1200)
+            page_origin = _origin(page.url)
+            if page_origin[0] != "https" or not page_origin[1]:
+                return ""
+            for frame in page.frames:
+                if self._member_signed_in(frame):
+                    scheme, host, port = _origin(frame.url)
+                    if scheme != "https" or not host:
+                        continue
+                    return f"https://{host}" + (f":{port}" if port != 443 else "")
+        except Exception:
+            return ""
+        return ""
+
+    def _sync_member_page(self, account, context, page, stored, retained=None,
+                          adopted_origin=""):
         """Persist a manually completed login from a visible shared-Chrome tab.
 
         The page must visibly expose the signed-in member UI. When its UID has
@@ -758,6 +858,8 @@ class AuthService:
         try:
             if page.is_closed():
                 return "absent"
+            if _is_pinnacle_host(urlsplit(str(page.url or "")).hostname or ""):
+                return "not_signed_in"
             page.set_default_timeout(2500)
         except Exception:
             return "unavailable"
@@ -795,6 +897,12 @@ class AuthService:
             job.member_ui_verified = False
             job.resume_url = ""
 
+        if adopted_origin and not self._trusted_page(job, page.url):
+            # The verified Crown page is the source of truth. Its current
+            # origin replaces any stale saved handoff.
+            job.member_origin = adopted_origin
+            job.member_protocol = {}
+            job.resume_url = ""
         if not self._trusted_page(job, page.url):
             return "absent"
         try:
