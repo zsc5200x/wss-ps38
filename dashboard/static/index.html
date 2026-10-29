@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#0a0f19">
   <title>赔率数据终端</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20261030-1">
+  <link rel="stylesheet" href="/static/styles.css?v=20261030-2">
 </head>
 <body>
   <div class="ambient ambient-a" aria-hidden="true"></div>
@@ -354,6 +354,7 @@
         </div>
       </div>
       <p class="merge-policy">平台赛事 ID 各自独立；开赛时间统一换算为北京时间参与匹配；系统只提供候选，确认后才建立映射。</p>
+      <div id="mergeSourceStatus" class="merge-source-status" role="status" aria-label="采集来源状态"></div>
       <div id="mergeError" class="merge-error hidden" role="alert"></div>
       <div id="mergeLoading" class="merge-state" role="status">正在读取两家赛事...</div>
       <div id="mergeEmpty" class="merge-state hidden" role="status"></div>
@@ -577,6 +578,6 @@
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/static/app.js?v=20261030-1" defer></script>
+  <script type="module" src="/static/app.js?v=20261030-2"></script>
 </body>
 </html>

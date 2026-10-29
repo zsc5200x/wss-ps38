@@ -20,7 +20,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from playwright.sync_api import sync_playwright
 
-from dashboard_server import iter_event_records, metadata_status, now_iso
+from src.providers.pinnacle.parser import iter_event_records, metadata_status
+from src.core.time import now_iso
 from project_config import PROJECT_DIR, get_path, load_config
 
 
@@ -418,7 +419,7 @@ def main() -> None:
     parser.add_argument("--event-id", action="append", default=[], help="只检查指定赛事 ID")
     parser.add_argument("--concurrency", type=int, default=3, help="并发请求数，1-8")
     parser.add_argument("--batch-size", type=int, default=20, help="每批处理数量")
-    parser.add_argument("--status", default=str(DEFAULT_STATUS_PATH), help="状态文件路径")
+    parser.add_argument("--status", default=None, help="状态文件路径")
     args = parser.parse_args()
     if args.limit < 0:
         raise SystemExit("--limit 不能小于 0")
@@ -426,11 +427,15 @@ def main() -> None:
         raise SystemExit("--concurrency 必须在 1 到 8 之间")
     if args.batch_size <= 0:
         raise SystemExit("--batch-size 必须大于 0")
-    status_path = Path(args.status).expanduser()
+    config = load_config()
+    status_path = (
+        Path(args.status).expanduser() if args.status
+        else get_path(config, "run_dir") / "metadata_sync.status.json"
+    )
     if not status_path.is_absolute():
         status_path = PROJECT_DIR / status_path
     state = run_sync(
-        config=load_config(),
+        config=config,
         apply=args.apply,
         limit=args.limit,
         event_ids=args.event_id or None,

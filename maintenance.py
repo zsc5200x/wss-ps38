@@ -19,9 +19,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from project_config import PROJECT_DIR, get_path, load_config
+from src.core.runtime_lock import runtime_data_lock
 
 
-LOCK_PATH = PROJECT_DIR / ".run" / "maintenance.lock"
 CAPTURE_FILE_RE = re.compile(r"^capture-\d{8}-\d{6}(?:-\d+)?\.jsonl$")
 BACKUP_FILE_RE = re.compile(r"^odds_history-\d{8}-\d{6}(?:-\d+)?\.sqlite3$")
 
@@ -277,14 +277,17 @@ def run_maintenance(
     return result
 
 
-def acquire_lock() -> Any:
-    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    handle = LOCK_PATH.open("w", encoding="utf-8")
+def acquire_lock(config: Optional[Dict[str, Any]] = None) -> Any:
+    lock_path = get_path(load_config() if config is None else config, "run_dir") / "maintenance.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+", encoding="utf-8")
     try:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError as exc:
         handle.close()
         raise RuntimeError("已有维护任务正在运行") from exc
+    handle.seek(0)
+    handle.truncate()
     handle.write(str(os.getpid()))
     handle.flush()
     return handle
@@ -300,17 +303,19 @@ def main() -> None:
     if args.db_only and args.capture_only:
         parser.error("--db-only 与 --capture-only 不能同时使用")
 
-    lock = acquire_lock()
-    try:
-        result = run_maintenance(
-            load_config(),
-            do_database=not args.capture_only,
-            do_capture=not args.db_only,
-            force=args.force,
-            dry_run=args.dry_run,
-        )
-    finally:
-        lock.close()
+    with runtime_data_lock(PROJECT_DIR):
+        config = load_config()
+        lock = acquire_lock(config)
+        try:
+            result = run_maintenance(
+                config,
+                do_database=not args.capture_only,
+                do_capture=not args.db_only,
+                force=args.force,
+                dry_run=args.dry_run,
+            )
+        finally:
+            lock.close()
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

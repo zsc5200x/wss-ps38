@@ -6,10 +6,18 @@ import unittest
 from pathlib import Path
 
 from dashboard_server import HistoryDatabase
-from maintenance import backup_database, compress_capture_files
+from maintenance import acquire_lock, backup_database, compress_capture_files
 
 
 class MaintenanceTests(unittest.TestCase):
+    def test_maintenance_lock_follows_configured_directory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp) / "custom-run"
+            with acquire_lock({"run_dir": str(directory)}):
+                self.assertTrue((directory / "maintenance.lock").exists())
+                with self.assertRaisesRegex(RuntimeError, "维护任务"):
+                    acquire_lock({"run_dir": str(directory)})
+
     def test_database_backup_is_consistent_and_retained(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

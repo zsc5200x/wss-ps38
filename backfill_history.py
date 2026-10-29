@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional
 
-from dashboard_server import OddsStore
+from src.services.odds_store import OddsStore
 from project_config import PROJECT_DIR, get_path, load_config
 
 
@@ -33,6 +33,7 @@ def now_iso() -> str:
 
 def discover_capture_files(active_path: Path) -> list[Path]:
     """Return rotated files in chronological order, followed by the active file."""
+    active_path = active_path.expanduser().resolve()
     directory = active_path.parent
     rotated_paths = list(directory.glob("capture-*.jsonl"))
     rotated_paths.extend(directory.glob("capture-*.jsonl.gz"))
@@ -129,16 +130,18 @@ def _file_progress(
 def run_backfill(
     config: Dict[str, Any],
     files: Optional[Iterable[Path]] = None,
-    state_path: Path = DEFAULT_STATE_PATH,
+    state_path: Optional[Path] = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
     max_lines: int = 0,
     reset_checkpoint: bool = False,
     report: Callable[[str], None] = print,
 ) -> Dict[str, Any]:
+    if state_path is None:
+        state_path = get_path(config, "run_dir") / "backfill_history.state.json"
     if reset_checkpoint and state_path.exists():
         state_path.unlink()
 
-    active_path = get_path(config, "capture_path")
+    active_path = get_path(config, "capture_path").resolve()
     capture_files = list(files) if files is not None else discover_capture_files(active_path)
     state = load_checkpoint(state_path)
     state["version"] = STATE_VERSION
@@ -292,7 +295,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="回填历史赔率到 SQLite")
     parser.add_argument(
         "--state",
-        default=str(DEFAULT_STATE_PATH),
+        default=None,
         help="断点文件路径",
     )
     parser.add_argument(
@@ -327,7 +330,10 @@ def main() -> None:
     config = load_config()
     if args.db:
         config["dashboard_db_path"] = args.db
-    state_path = Path(args.state).expanduser()
+    state_path = (
+        Path(args.state).expanduser() if args.state
+        else get_path(config, "run_dir") / "backfill_history.state.json"
+    )
     if not state_path.is_absolute():
         state_path = PROJECT_DIR / state_path
 

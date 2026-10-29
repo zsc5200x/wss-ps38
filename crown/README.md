@@ -1,116 +1,93 @@
 # 皇冠足球赔率终端
 
-本项目只负责皇冠（Crown）会员站足球赛事的本地只读采集与展示。
+皇冠运行时负责会员站足球赛事与盘口的本地只读采集，在主看板的“皇冠数据”页面独立展示。主页才对照已确认绑定的平博盘口；“皇冠数据”页只显示皇冠来源。
 
-## 功能范围
+## 启动和依赖
 
-- 皇冠账号管理：只保存登录地址和账号，不接收密码、安全密码或 TOTP。
-- 手动浏览器登录：在平博同一个 Chrome 窗口中打开第二个普通标签页，由用户手动登录和完成二次验证。
-- 会话管理：保存、检查、重新登录、清除会话和删除账号。
-- 赛事轮询：登录成功后读取今日足球与滚球足球，默认每 6 秒轮询一次。
-- 失败退避：上游超时或暂时不可用时按 10、20、40、60 秒退避，页面保留最近一次成功数据。
-- 持久缓存：最近一次成功快照原子写入 `data/events-cache.json`，重启时先显示缓存并标明上次更新时间；缓存不含凭据。
-- 重复登录诊断：上游返回 `doubleLogin` 时明确显示 `session_conflict`，不再误报为赛事目录不完整。
-- 盘口展示：主盘、让球、大小球、独赢和附加盘；附加盘由 `game_more` 按需和后台批次加载。
-- 统一状态：嵌入主看板时通过 `postMessage` 同步在线状态、缓存状态、赛事数和更新时间。
-- 本地页面：前端每 3 秒读取轻量赛事快照，登录状态和会话操作独立展示。
+推荐从项目根目录使用统一脚本：
 
-## 目录
+```bash
+./start.sh
+./crown.sh
+```
+
+`start.sh` 启动完整项目并在需要时补开普通皇冠标签页；`crown.sh` 仅启动皇冠后端。默认统一页面 `http://127.0.0.1:8787/#crown`，皇冠后端默认 `http://127.0.0.1:8887/crown`。端口和主机来自根目录共享配置。
+
+皇冠现有环境基线为 macOS / Python 3.14，完整依赖版本快照位于 `requirements/crown-macos-py314.lock`。只在新建环境时，从项目根目录运行：
+
+```bash
+python3.14 -m venv crown/.venv
+crown/.venv/bin/python -m pip install -r requirements/crown-macos-py314.lock
+```
+
+共享 CDP 使用已安装的 Chrome，不需要为了这一流程安装 Playwright 自带 Chromium。根 `.venv` 是平博的独立 Python 3.9 环境，不与皇冠混装。
+
+手动运行后端仍读取统一配置：
+
+```bash
+crown/.venv/bin/python crown/app.py
+```
+
+`PS3838_CONFIG` 选择配置文件，非空环境变量优先于 JSON，JSON 优先于默认值。`crown_cdp_url` 留空时继承平博 `cdp_url`；`CROWN_CDP_URL` 可专用覆盖。直接运行后端也默认复用共享 CDP，不再因省略该环境变量切换到独立浏览器。
+
+## 手动登录
+
+1. 打开“皇冠数据”，进入账号设置或“连接皇冠会话”。
+2. 保存皇冠登录地址和账号，打开普通登录标签页。
+3. 在皇冠站点页面自行输入账号、密码与验证码/二次验证信息。
+4. 保持登录标签打开，等待会话同步及赛事刷新；必要时点击“检查会话”。
+
+项目不自动填写或提交登录表单，不接收或保存密码、安全密码和 TOTP。账号与加密会话用于后续只读查询；保存共享上下文 Cookie 时按皇冠来源过滤，不写入平博 Cookie。
+
+上游 `doubleLogin` 映射为 `session_conflict`，表示旧保存会话被拒绝。它不证明当前浏览器标签未登录，也不证明一定存在另一设备登录。系统会检查当前已登录皇冠标签并同步会话；持续未恢复时再检查会话或在原标签手动登录。
+
+## 刷新和缓存
+
+- 基础赛事列表成功刷新默认以 4 秒为目标周期，耗时较长时实际间隔随请求延长。
+- 普通上游错误按 4、8、16、30 秒退避；无会话、会话冲突等状态使用各自重试间隔。
+- 页面每 1 秒读取本地轻量快照，不以该频率请求皇冠上游。
+- 附加盘单独排队和缓存：滚球缓存目标 10 秒、其他赛事 30 秒，受并发和批量限制，不能保证与列表同一时刻更新。
+- 最近成功快照原子写入 `crown_data_dir/events-cache.json`。服务重启或请求失败时仍可显示缓存，并标明最后成功时间。
+- 缓存只含规范化赛事与盘口，不含账号密码、Cookie 或会话凭据；账号及加密会话存储另在该目录的数据库中。
+
+接口在线和已登录都不等于盘口数据一定最新或有权限。请结合页面来源状态、详情加载状态、最后更新时间及诊断日志判断。
+
+## 目录与数据
 
 ```text
 app.py                         HTTP 服务、静态页面和 API 路由
-crown_runtime.py               皇冠账号运行时、赛事轮询、持久缓存和盘口标准化
-crown_local/backend/           皇冠会话监听、会员站、赔率和存储
-static/index.html              皇冠页面结构
-static/app.css                 皇冠页面样式
-static/app.js                  皇冠页面交互、轮询和嵌入状态同步
+crown_runtime.py               账号运行时、列表轮询、缓存和盘口标准化
+crown_local/backend/           会话监听、会员站请求、赔率和存储
+static/                        皇冠页面、样式和交互脚本
 event_filters.py               皇冠赛事名称过滤
-data/crown.sqlite3             皇冠账号、会话和运行数据（不要提交或删除）
-data/events-cache.json         最近一次成功赛事快照（不入库、不含凭据）
-test_crown_api.py              皇冠页面、静态资源和路由测试
-test_crown_cache.py            持久缓存与损坏文件回退测试
-test_crown_session_errors.py   重复登录和上游错误映射测试
-test_crown_odds_display.py     皇冠赔率和附加盘测试
+test_*.py                      皇冠服务、会话、缓存和赔率回归测试
 ```
 
-`data/crown.sqlite3` 是本地账号和会话数据，属于运行数据，不应放入 Git。
-
-## 启动
-
-项目要求 Python 3.11 或更高版本。
-
-通过项目根目录的 `./start.sh` 启动时，如果共享 Chrome 中没有皇冠页面，启动脚本只会直接打开账号配置的皇冠地址，不会启动登录监听或填写、提交账号信息。要让看板保存并使用新登录会话，请在皇冠设置中手动点击该账号的“打开登录页”，然后在皇冠标签页中登录；监听和会话保存仅限皇冠来源，平博 Cookie 不会写入皇冠会话。`./crown.sh` 只启动皇冠服务，不自动打开或登录皇冠页面。直接运行 `app.py` 且未设置 `CROWN_CDP_URL` 时，会回退为皇冠独立浏览器。
-
-```bash
-cd /Users/zsc5200x/ps3838-wss/crown
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/python -m playwright install chromium
-.venv/bin/python app.py
-```
-
-如手动指定共享浏览器：
-
-```bash
-CROWN_CDP_URL=http://127.0.0.1:9222 .venv/bin/python app.py
-```
-
-启动后访问：
-
-- 统一入口：<http://127.0.0.1:8787/#crown>（推荐，由主看板同源代理）
-- 皇冠独立页面：<http://127.0.0.1:8887/crown>
-- 根路径：<http://127.0.0.1:8887/>，会 302 跳转到 `/crown`
-
-如果登录时需要可见浏览器，请确保本机已安装 Google Chrome 或 Playwright Chromium。
-
-## 使用流程
-
-1. 打开 `/crown`，点击“连接皇冠会话”或进入设置。
-2. 填写皇冠登录地址和账号，点击“保存账号并打开皇冠标签页”。
-3. 在平博同一个 Chrome 窗口新增的皇冠普通标签页中手动输入账号、密码，并按页面要求完成验证码或二次验证。本项目和网页端都不会接收或保存这些密码类信息。
-4. 登录成功后，页面会自动读取滚球和今日赛事；也可点击“检查会话”确认当前会话。
-5. 点击赛事可查看主盘和附加盘。附加盘加载完成前会显示加载状态，失败时保留上一次成功的报价。
-
-## 轮询和刷新
-
-- 后端 `crown_refresh_loop()` 默认每 6 秒调用一次皇冠列表接口。
-- 上游失败时使用指数式退避：10 秒、20 秒、40 秒、60 秒，之后保持 60 秒。
-- 前端每 3 秒请求一次 `/api/crown/events?compact=1`，只读取轻量快照，不直接访问皇冠上游。
-- 登录成功不等于盘口权限已确认；如果站点返回无权限或会话失效，页面会显示对应状态并保留旧数据。
-- 会话失效后系统不会自动重新打开登录流程；请从皇冠设置中手动点击“打开登录页”并完成登录。
-- 如果 API 返回 `session_conflict`，表示皇冠拒绝了系统保存的旧会话，不代表当前浏览器标签未登录。共享 Chrome 下系统会检查已登录的皇冠标签并同步新会话；若持续未恢复，再检查其他设备会话或手动重新登录。
+数据路径由根 `project_config.py` 的 `crown_data_dir` 管理；旧默认 `crown/data/` 继续兼容，新示例与迁移布局使用 `var/crown/`。目录中的 `crown.sqlite3`、会话密钥和缓存都是本机数据，不提交 Git。迁移与回退使用根目录统一工具，参见 [运维指南](../docs/operations.md)。
 
 ## API
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
 | GET | `/crown` | 皇冠赛事页面 |
-| GET | `/crown/static/app.css` | 皇冠页面样式 |
-| GET | `/crown/static/app.js` | 皇冠页面交互脚本 |
 | GET | `/api/crown/events` | 完整皇冠赛事快照 |
 | GET | `/api/crown/events?compact=1` | 前端轻量赛事快照 |
 | GET | `/api/crown/accounts` | 皇冠账号列表 |
-| POST | `/api/crown/accounts` | 保存皇冠地址和账号，并打开普通登录标签页 |
-| GET | `/api/crown/session` | 当前会话和运行诊断（不含赛事） |
-| POST | `/api/crown/session/check` | 检查当前皇冠会话并刷新数据 |
-| POST | `/api/crown/events/<GID>/details` | 加载指定赛事的附加盘 |
-| POST | `/api/crown/accounts/<id>/<action>` | 登录、检查、重新登录、取消、清除或删除 |
-| DELETE | `/api/crown/accounts/<id>` | 删除皇冠账号 |
+| POST | `/api/crown/accounts` | 保存地址和账号、打开普通登录标签页 |
+| GET | `/api/crown/session` | 当前会话及运行诊断 |
+| POST | `/api/crown/session/check` | 检查当前会话并刷新数据 |
+| POST | `/api/crown/events/<GID>/details` | 加载指定赛事附加盘 |
+| POST | `/api/crown/accounts/<id>/<action>` | 账号登录、检查、取消、清除等操作 |
+| DELETE | `/api/crown/accounts/<id>` | 删除本地账号及其会话 |
 
-未定义的旧接口会返回 404。
-
-## 数据与安全
-
-- 浏览器会话由 `crown_local/backend/storage.py` 加密保存；密码、安全密码和 TOTP 不接收、不落盘。
-- 共享 Chrome 上下文的 Cookie 在保存前按皇冠来源过滤，平博 Cookie 不会进入皇冠会话记录。
-- 页面和 API 只监听 `127.0.0.1`，不要将端口直接暴露到公网。
-- 不要把 `data/`、Cookie、会话密钥或账号密码提交到 Git。
-- 本项目只执行只读赛事和赔率查询，不提供下注提交逻辑。
+浏览器通过主看板同源代理使用上述路径。默认仅监听本机 `127.0.0.1`；更改绑定主机前应确认访问边界，账号与会话接口不适合作为公网服务。
 
 ## 验证
 
+在项目根目录运行统一检查：
+
 ```bash
-.venv/bin/python -m py_compile app.py crown_runtime.py crown_local/backend/*.py
-.venv/bin/python -m unittest discover -v
-git diff --check
+./check.sh
 ```
+
+该入口分别使用两套 Python，并为皇冠测试配置临时数据目录。不要为测试连接真实账号数据库。日志位于统一 `log_dir` 下的 `crown.log`，数据滞留、会话同步和附加盘问题的排查步骤见 [运维指南](../docs/operations.md#排障顺序)。

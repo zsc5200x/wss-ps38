@@ -6,37 +6,36 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager
-from datetime import datetime
-from pathlib import Path
 from collections import Counter
 
 from odds_utils import normalize_odds
 from project_config import get_path, load_config
+from src.core.constants import FULL_TIME_STAGE, SUPPORTED_MARKETS
+from src.providers.pinnacle.parser import iter_event_records, iter_messages, iter_leaf_rows, metadata_status
 
-CONFIG = load_config()
-CAPTURE = get_path(CONFIG, "capture_path")
-EVENTS = get_path(CONFIG, "events_file")
-OUTPUT = get_path(CONFIG, "live_snapshot_file")
-TEMP = OUTPUT.with_name(OUTPUT.name + ".tmp")
+# Runtime paths are populated by main(); importing this module performs no I/O.
+CONFIG = {}
+CAPTURE = EVENTS = OUTPUT = TEMP = None
+SNAPSHOT_INTERVAL = 2.0
+ONCE = False
 
-try:
-    SNAPSHOT_INTERVAL = max(
-        0.1, float(CONFIG.get("snapshot_interval_seconds", 2))
-    )
-except (TypeError, ValueError):
-    SNAPSHOT_INTERVAL = 2.0
 
-ONCE = "--once" in sys.argv
-FULL_TIME_STAGE = "0"
-SUPPORTED_MARKETS = frozenset({"1", "2", "3"})
+def iter_events(container):
+    """Keep the legacy tuple shape over the shared complete event parser."""
+    for event in iter_event_records(container):
+        yield (event["eventId"], event["home"], event["away"], event["league"],
+               event["kickoff"], event["sportId"], event["leagueId"])
 
-if not CAPTURE.exists() or not EVENTS.exists():
-    raise SystemExit(f"缺少采集文件或赛事文件：{CAPTURE} / {EVENTS}")
+
+# Historical helper names remain available to callers.
+walk = iter_messages
+leaf_rows = iter_leaf_rows
 
 
 def discover_rotated_capture_files(active_path):
     """Return rotated capture files in replay order, excluding the active file."""
-    active_resolved = active_path.resolve()
+    active_path = active_path.expanduser().resolve()
+    active_resolved = active_path
     rotated_paths = list(active_path.parent.glob("capture-*.jsonl"))
     rotated_paths.extend(active_path.parent.glob("capture-*.jsonl.gz"))
     rotated_paths.extend(active_path.parent.glob("capture-*.jsonl.zst"))
@@ -83,92 +82,7 @@ def get(row, *keys):
     return ""
 
 
-def metadata_status(name, league, kickoff):
-    if name and not name.startswith("赛事 ") and league and kickoff:
-        return "complete"
-    if (name and not name.startswith("赛事 ")) or league or kickoff:
-        return "partial"
-    return "missing"
-
 event_map = {}
-
-with EVENTS.open(encoding="utf-8-sig", newline="") as f:
-    for row in csv.DictReader(f):
-        eid = get(row, "event_id", "id")
-        if not eid:
-            continue
-
-        name = get(row, "比赛")
-        if not name:
-            name = (
-                get(row, "主队", "home")
-                + " VS "
-                + get(row, "客队", "away")
-            ).strip()
-
-        event_map[eid] = {
-            "比赛": name,
-            "sport_id": get(row, "sport_id"),
-            "league_id": get(row, "league_id"),
-            "联赛": get(row, "联赛", "league"),
-            "开赛时间": get(row, "开赛时间", "kickoff"),
-        }
-        event_map[eid]["元数据状态"] = metadata_status(
-            event_map[eid]["比赛"],
-            event_map[eid]["联赛"],
-            event_map[eid]["开赛时间"],
-        )
-
-
-def iter_events(container):
-    """解析平博 l/n 字段中的体育、联赛和赛事元数据。"""
-    if not isinstance(container, list):
-        return
-
-    for sport in container:
-        if not isinstance(sport, list) or len(sport) < 3:
-            continue
-        sport_id = str(sport[0] or "").strip()
-
-        leagues = sport[2]
-        if not isinstance(leagues, list):
-            continue
-
-        for league in leagues:
-            if not isinstance(league, list) or len(league) < 3:
-                continue
-
-            league_id = str(league[0] or "").strip()
-            league_name = str(league[1] or "").strip()
-            events = league[2]
-
-            if not isinstance(events, list):
-                continue
-
-            for event in events:
-                if not isinstance(event, list) or len(event) < 5:
-                    continue
-
-                eid = str(event[0] or "").strip()
-                if not eid:
-                    continue
-
-                home = str(event[1] or "").strip()
-                away = str(event[2] or "").strip()
-                kickoff = ""
-
-                try:
-                    stamp = float(event[4])
-                    if stamp > 100_000_000_000:
-                        stamp /= 1000
-                    if stamp > 0:
-                        kickoff = datetime.fromtimestamp(
-                            stamp
-                        ).astimezone().strftime("%Y-%m-%d %H:%M:%S")
-                except (ValueError, TypeError, OSError, OverflowError):
-                    pass
-
-                yield eid, home, away, league_name, kickoff, sport_id, league_id
 
 
 def register_event(eid, home, away, league, kickoff, sport_id="", league_id=""):
@@ -216,35 +130,6 @@ def register_event(eid, home, away, league, kickoff, sport_id="", league_id=""):
 
     return True
 
-
-def walk(obj):
-    if isinstance(obj, dict):
-        yield obj
-        for value in obj.values():
-            yield from walk(value)
-    elif isinstance(obj, list):
-        for value in obj:
-            yield from walk(value)
-    elif isinstance(obj, str):
-        s = obj.strip()
-        if s.startswith(("{", "[")):
-            try:
-                yield from walk(json.loads(s))
-            except (json.JSONDecodeError, RecursionError):
-                pass
-
-def leaf_rows(obj):
-    if isinstance(obj, list):
-        if len(obj) >= 13 and all(
-            not isinstance(x, (list, dict)) for x in obj
-        ):
-            yield obj
-        else:
-            for item in obj:
-                yield from leaf_rows(item)
-    elif isinstance(obj, dict):
-        for value in obj.values():
-            yield from leaf_rows(value)
 
 latest = {}
 event_rows = {}
@@ -390,90 +275,150 @@ def write_snapshot():
         flush=True
     )
 
-print("正在读取现有历史采集文件，请稍等……", flush=True)
 
-rotated_files = discover_rotated_capture_files(CAPTURE)
-for rotated_path in rotated_files:
-    print(f"回放轮转采集文件：{rotated_path.name}", flush=True)
-    with open_rotated_capture(rotated_path) as rotated_handle:
+def main(argv=None):
+    """Load configured files, build a snapshot, and optionally follow new data."""
+    global CONFIG, CAPTURE, EVENTS, OUTPUT, TEMP, SNAPSHOT_INTERVAL, ONCE
+    global message_count, parse_errors
+    event_map.clear()
+    latest.clear()
+    event_rows.clear()
+    updates.clear()
+    valid_updates.clear()
+    message_count = parse_errors = 0
+    CONFIG = load_config()
+    CAPTURE = get_path(CONFIG, "capture_path").resolve()
+    EVENTS = get_path(CONFIG, "events_file")
+    OUTPUT = get_path(CONFIG, "live_snapshot_file")
+    TEMP = OUTPUT.with_name(OUTPUT.name + ".tmp")
+
+    try:
+        SNAPSHOT_INTERVAL = max(
+            0.1, float(CONFIG.get("snapshot_interval_seconds", 2))
+        )
+    except (TypeError, ValueError):
+        SNAPSHOT_INTERVAL = 2.0
+
+    ONCE = "--once" in (sys.argv[1:] if argv is None else argv)
+
+    if not CAPTURE.exists() or not EVENTS.exists():
+        raise SystemExit(f"缺少采集文件或赛事文件：{CAPTURE} / {EVENTS}")
+
+    with EVENTS.open(encoding="utf-8-sig", newline="") as f:
+        for row in csv.DictReader(f):
+            eid = get(row, "event_id", "id")
+            if not eid:
+                continue
+
+            name = get(row, "比赛")
+            if not name:
+                name = (
+                    get(row, "主队", "home")
+                    + " VS "
+                    + get(row, "客队", "away")
+                ).strip()
+
+            event_map[eid] = {
+                "比赛": name,
+                "sport_id": get(row, "sport_id"),
+                "league_id": get(row, "league_id"),
+                "联赛": get(row, "联赛", "league"),
+                "开赛时间": get(row, "开赛时间", "kickoff"),
+            }
+            event_map[eid]["元数据状态"] = metadata_status(
+                event_map[eid]["比赛"],
+                event_map[eid]["联赛"],
+                event_map[eid]["开赛时间"],
+            )
+
+    print("正在读取现有历史采集文件，请稍等……", flush=True)
+
+    rotated_files = discover_rotated_capture_files(CAPTURE)
+    for rotated_path in rotated_files:
+        print(f"回放轮转采集文件：{rotated_path.name}", flush=True)
+        with open_rotated_capture(rotated_path) as rotated_handle:
+            pending = ""
+            while True:
+                line = rotated_handle.readline()
+                if not line:
+                    break
+                pending += line
+                if pending.endswith("\n"):
+                    process_line(pending)
+                    pending = ""
+            if pending:
+                process_line(pending)
+
+    with CAPTURE.open(encoding="utf-8") as f:
+        try:
+            file_inode = CAPTURE.stat().st_ino
+        except OSError:
+            file_inode = None
         pending = ""
+
+        # 先建立现有历史快照，保留最后一条未完成的行
         while True:
-            line = rotated_handle.readline()
+            line = f.readline()
             if not line:
                 break
+
             pending += line
             if pending.endswith("\n"):
                 process_line(pending)
                 pending = ""
-        if pending:
-            process_line(pending)
 
-with CAPTURE.open(encoding="utf-8") as f:
-    try:
-        file_inode = CAPTURE.stat().st_ino
-    except OSError:
-        file_inode = None
-    pending = ""
+        write_snapshot()
+        if ONCE:
+            print("单次回放完成，未继续监听新增数据。", flush=True)
+            return 0
 
-    # 先建立现有历史快照，保留最后一条未完成的行
-    while True:
-        line = f.readline()
-        if not line:
-            break
+        print("初始化完成，开始监听新增采集数据。", flush=True)
 
-        pending += line
-        if pending.endswith("\n"):
-            process_line(pending)
-            pending = ""
+        dirty = False
+        last_write = time.monotonic()
+        last_status = time.monotonic()
 
-    write_snapshot()
-    if ONCE:
-        print("单次回放完成，未继续监听新增数据。", flush=True)
-        raise SystemExit(0)
+        while True:
+            line = f.readline()
 
-    print("初始化完成，开始监听新增采集数据。", flush=True)
+            if line:
+                pending += line
 
-    dirty = False
-    last_write = time.monotonic()
-    last_status = time.monotonic()
+                if pending.endswith("\n"):
+                    if process_line(pending):
+                        dirty = True
+                    pending = ""
+            else:
+                # capture.py may rotate the JSONL file. Reopen the new inode so
+                # the live process continues following fresh messages.
+                try:
+                    current_inode = CAPTURE.stat().st_ino
+                except OSError:
+                    current_inode = file_inode
+                if file_inode is not None and current_inode != file_inode:
+                    f.close()
+                    f = CAPTURE.open(encoding="utf-8")
+                    file_inode = current_inode
+                    pending = ""
+                    continue
+                time.sleep(0.25)
 
-    while True:
-        line = f.readline()
+            now = time.monotonic()
 
-        if line:
-            pending += line
+            if dirty and now - last_write >= SNAPSHOT_INTERVAL:
+                write_snapshot()
+                dirty = False
+                last_write = now
 
-            if pending.endswith("\n"):
-                if process_line(pending):
-                    dirty = True
-                pending = ""
-        else:
-            # capture.py may rotate the JSONL file. Reopen the new inode so
-            # the live process continues following fresh messages.
-            try:
-                current_inode = CAPTURE.stat().st_ino
-            except OSError:
-                current_inode = file_inode
-            if file_inode is not None and current_inode != file_inode:
-                f.close()
-                f = CAPTURE.open(encoding="utf-8")
-                file_inode = current_inode
-                pending = ""
-                continue
-            time.sleep(0.25)
+            if now - last_status >= 15:
+                print(
+                    f"监听中 | UPDATE_ODDS={message_count} | "
+                    f"已跟踪赛事={len(updates)} | "
+                    f"解析错误={parse_errors}",
+                    flush=True
+                )
+                last_status = now
 
-        now = time.monotonic()
 
-        if dirty and now - last_write >= SNAPSHOT_INTERVAL:
-            write_snapshot()
-            dirty = False
-            last_write = now
-
-        if now - last_status >= 15:
-            print(
-                f"监听中 | UPDATE_ODDS={message_count} | "
-                f"已跟踪赛事={len(updates)} | "
-                f"解析错误={parse_errors}",
-                flush=True
-            )
-            last_status = now
+if __name__ == "__main__":
+    raise SystemExit(main())

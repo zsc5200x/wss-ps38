@@ -1,3 +1,5 @@
+import { createConfirmedMarkets } from "./modules/confirmed-markets.js";
+
 function installSourceRouter(){
   if(window.__sourceRouterInstalled)return;
   window.__sourceRouterInstalled=true;
@@ -72,9 +74,11 @@ let crownSessionProbeInFlight=false;
 const crownExtraAttempts=new Map();
 const crownExtraLoading=new Set();
 const crownAccountActionsInFlight=new Set();
-const crownConfirmedById=new Map();
-const crownConfirmedLoading=new Set();
-const crownConfirmedAttempts=new Map();
+const crownConfirmed = createConfirmedMarkets({
+  enabled: crownFixtures,
+  escapeHtml: crownEsc,
+  onChange: () => { crownRenderedSignature = ""; crownRender(crownLatestState); },
+});
 
 function crownPostEmbeddedState(){
   if(!crownEmbedded||window.parent===window)return;
@@ -249,97 +253,10 @@ function crownMoneyline(event){
   const labels=[event.home||"主队","和局",event.away||"客队"];
   return `<article class="market-book moneyline"><header class="market-book-head"><h3>全场胜平负</h3><small>${crownEsc(statusText)}</small></header><div class="moneyline-grid">${labels.map((label,index)=>`<div class="moneyline-cell"><span>${crownEsc(label)}</span><strong>${crownEsc(values[index]||"—")}</strong></div>`).join("")}</div></article>`;
 }
-function crownConfirmedFor(event){
-  if(!crownFixtures)return null;
-  const id=String(event&&event.id||"");
-  return id?crownConfirmedById.get(id)||null:null;
-}
-function crownConfirmedCrownEvent(event,confirmed){
-  const source=confirmed&&((confirmed.crown||confirmed.crownEvent));
-  if(!source||typeof source!=="object")return event;
-  // Keep the live Crown row (score, minute and current markets) ahead of the
-  // persisted mapping snapshot while using the Crown snapshot as a fallback.
-  return {...source,...event,markets:event.markets||source.markets||{},extra_markets:event.extra_markets||source.extra_markets||{}};
-}
-function crownFormatPinnacleLine(value){
-  const number=Number(value);
-  if(!Number.isFinite(number))return String(value??"—");
-  const rounded=number.toFixed(2).replace(/\.?0+$/,"" );
-  return rounded==="-0"?"0":rounded;
-}
-function crownFormatPinnacleHandicap(value){
-  const number=Number(value);
-  if(!Number.isFinite(number))return crownFormatPinnacleLine(value);
-  if(Math.abs(number)<0.000001)return "0";
-  return `${number>0?"+":""}${crownFormatPinnacleLine(number)}`;
-}
-function crownFormatPinnacleTotal(value){
-  const number=Number(value);
-  if(!Number.isFinite(number))return crownFormatPinnacleLine(value);
-  const steps=Math.round(number*4);
-  if(Math.abs(number*4-steps)<0.000001&&Math.abs(steps)%2===1){
-    return `${crownFormatPinnacleLine(number-0.25)}/${crownFormatPinnacleLine(number+0.25)}`;
-  }
-  return crownFormatPinnacleLine(number);
-}
-function crownPinnacleTeams(event){
-  const home=String(event?.home||"").trim();
-  const away=String(event?.away||"").trim();
-  if(home||away)return [home||"主队",away||"客队"];
-  const parts=String(event?.name||"").split(/\s+VS\s+/i);
-  return [parts[0]||"主队",parts[1]||"客队"];
-}
-function crownPinnacleQuote(row,event){
-  const [home,away]=crownPinnacleTeams(event);
-  const market=String(row?.market||"");
-  const option=String(row?.option||"");
-  if(market==="1")return {label:{"0":`${home} 主胜`,"1":"和局","2":`${away} 客胜`}[option]||`选项 ${option}`,line:"全场"};
-  if(market==="2"){
-    const raw=Number(row?.line);
-    const side=option==="0"?raw:-raw;
-    const role=!Number.isFinite(side)||Math.abs(side)<0.000001?"平手":side<0?"让球":"受让";
-    return {label:`${option==="0"?home:away} ${crownFormatPinnacleHandicap(side)}`,line:role};
-  }
-  if(market==="3"){
-    const line=crownFormatPinnacleTotal(row?.line);
-    return {label:`${option==="3"?"大":"小"}${line}`,line:"总进球"};
-  }
-  return {label:`选项 ${option||"—"}`,line:`盘口 ${market||"—"}`};
-}
-function crownPinnaclePrice(row){
-  if(!row||row.quoted===false)return "—";
-  const hk=row.hongKongLabel??(row.hongKong==null?"":Number(row.hongKong).toFixed(3));
-  return String(hk||"—");
-}
-function crownPinnacleMarketBook(title,rows,event,marketCode){
-  const list=(Array.isArray(rows)?rows:[]).filter(row=>String(row?.market||"")===String(marketCode)&&row?.quoted!==false&&(row?.hongKong!=null||row?.hongKongLabel));
-  if(!list.length)return `<article class="market-book market-book-pinnacle"><header class="market-book-head"><h3>${title} · 平博</h3><small>当前没有有效盘口</small></header><div class="market-empty">平博暂无对应报价</div></article>`;
-  const lines=list.map(row=>{
-    const label=crownPinnacleQuote(row,event);
-    const price=crownPinnaclePrice(row);
-    return `<div class="pinnacle-quote-row"><div class="pinnacle-quote-label"><strong>${crownEsc(label.label)}</strong><span>${crownEsc(label.line)}</span></div><strong class="pinnacle-price">${crownEsc(price)}</strong></div>`;
-  }).join("");
-  return `<article class="market-book market-book-pinnacle"><header class="market-book-head"><h3>${title} · 平博</h3><small>${list.length} 条 · HK</small></header><div class="pinnacle-table-head"><span>投注项</span><span>香港盘</span></div>${lines}</article>`;
-}
-function crownConfirmedMarkets(confirmed,event){
-  if(!confirmed)return "";
-  const pinnacle=confirmed.pinnacle||confirmed.pinnacleEvent||{};
-  const rows=Array.isArray(pinnacle.odds)?pinnacle.odds:[];
-  const id=String(pinnacle.id||confirmed.pinnacleId||"");
-  const header=`<div class="markets-provider-title pinnacle-provider-title"><div><strong>平博对应盘口</strong><span>仅显示已确认关联赛事</span></div><small>平博 ID ${crownEsc(id||"—")}</small></div>`;
-  if(!rows.length)return `${header}<div class="market-book market-book-pinnacle market-book-pinnacle-empty"><div class="market-empty">已确认平博赛事，但当前还没有采集到对应盘口</div></div>`;
-  return `${header}${crownPinnacleMarketBook("胜平负",rows,event,"1")}${crownPinnacleMarketBook("让球",rows,event,"2")}${crownPinnacleMarketBook("大小球",rows,event,"3")}`;
-}
-function crownConfirmedSummary(confirmed,event){
-  if(!confirmed)return "";
-  const pinnacle=confirmed.pinnacle||confirmed.pinnacleEvent||{};
-  const crown=confirmed.crown||confirmed.crownEvent||event||{};
-  return `<div class="confirmed-merge-strip"><span class="confirmed-merge-badge">已确认关联</span><div><strong>${crownEsc(crown.league||event?.league||"皇冠联赛")}</strong><span>${crownEsc(crown.home||event?.home||"主队")} vs ${crownEsc(crown.away||event?.away||"客队")}</span></div><small>平博赛事 ${crownEsc(pinnacle.id||confirmed.pinnacleId||"—")}</small></div>`;
-}
 function crownEventDetail(event){
   if(!event)return `<div class="detail-empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M4 5h16v14H4z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg><strong>等待皇冠赛事数据</strong><p>打开皇冠登录并完成会话验证后，赛事和盘口会自动显示在这里。</p><button class="button primary" type="button" data-open-login>连接皇冠会话</button></div>`;
-  const confirmed=crownConfirmedFor(event);
-  event=crownConfirmedCrownEvent(event,confirmed);
+  const confirmed=crownConfirmed.get(event);
+  event=crownConfirmed.mergeEvent(event,confirmed);
   const markets=event.markets||{};
   const handicapItems=crownMarketItems(event,"handicap");
   const totalItems=crownMarketItems(event,"total");
@@ -351,7 +268,7 @@ function crownEventDetail(event){
     ? `<span class="meta-pill event-id-pill">皇冠比赛 ID ${crownEsc(event.id||"—")}</span><span class="meta-pill event-id-pill">平博比赛 ID ${crownEsc(pinnacleId||"待匹配")}</span>`
     : `<span class="meta-pill">皇冠 ID ${crownEsc(event.id||"—")}</span>`;
   const crownHeader=crownFixtures?"":`<div class="markets-provider-title crown-provider-title"><div><strong>皇冠盘口</strong><span>${crownEsc(event.odds_format_label||"皇冠港赔（HK）")}</span></div><small>皇冠 ID ${crownEsc(event.id||"—")}</small></div>`;
-  return `<article class="event-hero"><div class="event-hero-top"><div class="event-league"><span>${crownEsc(event.league||"未命名联赛")}</span></div><div class="event-hero-meta"><span class="meta-pill ${crownLive(event)?"live":""}">${crownLive(event)?"滚球":"今日待开"}</span><span class="meta-pill">${crownEsc(event.start_label||"时间未知")}</span>${eventIdMeta}</div></div><div class="match-hero"><div class="match-team">${crownEsc(event.home||"主队")}</div><div class="match-score"><strong>${crownEsc(score)}</strong><span>${crownEsc(detail)}</span></div><div class="match-team away">${crownEsc(event.away||"客队")}</div></div></article><div class="detail-summary-row"><div><span>皇冠报价组数</span><strong>${crownQuoteCount(event)} 组</strong></div><div><span>盘口格式</span><strong>${crownEsc(event.odds_format_label||"皇冠港赔（HK）")}</strong></div><div><span>数据来源</span><strong>${confirmed?"皇冠 + 平博":"当前项目"}</strong></div></div>${crownConfirmedSummary(confirmed,event)}<div class="markets-layout">${crownHeader}${crownMoneyline(event)}${crownMarketBook("让球",handicapItems,"handicap",event)}${crownMarketBook("大小球",totalItems,"total",event)}${crownConfirmedMarkets(confirmed,event)}</div>`;
+  return `<article class="event-hero"><div class="event-hero-top"><div class="event-league"><span>${crownEsc(event.league||"未命名联赛")}</span></div><div class="event-hero-meta"><span class="meta-pill ${crownLive(event)?"live":""}">${crownLive(event)?"滚球":"今日待开"}</span><span class="meta-pill">${crownEsc(event.start_label||"时间未知")}</span>${eventIdMeta}</div></div><div class="match-hero"><div class="match-team">${crownEsc(event.home||"主队")}</div><div class="match-score"><strong>${crownEsc(score)}</strong><span>${crownEsc(detail)}</span></div><div class="match-team away">${crownEsc(event.away||"客队")}</div></div></article><div class="detail-summary-row"><div><span>皇冠报价组数</span><strong>${crownQuoteCount(event)} 组</strong></div><div><span>盘口格式</span><strong>${crownEsc(event.odds_format_label||"皇冠港赔（HK）")}</strong></div><div><span>数据来源</span><strong>${confirmed?"皇冠 + 平博":"当前项目"}</strong></div></div>${crownConfirmed.renderSummary(confirmed,event)}<div class="markets-layout">${crownHeader}${crownMoneyline(event)}${crownMarketBook("让球",handicapItems,"handicap",event)}${crownMarketBook("大小球",totalItems,"total",event)}${crownConfirmed.renderMarkets(confirmed,event)}</div>`;
 }
 function crownRender(state){
   crownLatestState=state;
@@ -364,7 +281,7 @@ function crownRender(state){
   if(!visible.some(event=>event.id===crownSelectedId))crownSelectedId=visible[0]?.id||"";
   const selected=visible.find(event=>event.id===crownSelectedId)||null;
   if(selected)crownLoadExtra(selected);
-  if(selected)crownLoadConfirmed(selected);
+  if(selected)crownConfirmed.load(selected);
   const liveCount=activeEvents.filter(crownLive).length;
   const todayCount=activeEvents.length-liveCount;
   const leagueCount=new Set(activeEvents.map(event=>event.league).filter(Boolean)).size;
@@ -399,29 +316,6 @@ function crownRender(state){
   const emptyText=endedOnly?"":query?"没有匹配当前搜索条件的赛事。":crownFixtures?"当前暂时没有可显示的赛事。":"完成皇冠登录后，滚球和今日赛事会自动出现在这里。";
   crown$("crownEvents").innerHTML=groupHtml||`<div class="event-list-empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M4 5h16v14H4z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg><strong>${emptyTitle}</strong>${emptyText?`<p>${emptyText}</p>`:""}${!query&&!crownFixtures&&!endedOnly?'<button class="button primary" type="button" data-open-login>连接皇冠会话</button>':""}</div>`;
   crown$("crownEventDetail").innerHTML=crownEventDetail(selected);
-}
-async function crownLoadConfirmed(event,force=false){
-  if(!crownFixtures)return;
-  const crownId=String(event&&event.id||"");
-  if(!crownId||crownConfirmedLoading.has(crownId))return;
-  const lastAttempt=Number(crownConfirmedAttempts.get(crownId)||0);
-  if(!force&&Date.now()-lastAttempt<5000)return;
-  crownConfirmedAttempts.set(crownId,Date.now());
-  crownConfirmedLoading.add(crownId);
-  try{
-    const response=await fetch(`/api/merge/confirmed?crownId=${encodeURIComponent(crownId)}`,{cache:"no-store"});
-    if(!response.ok)return;
-    const payload=await response.json();
-    const item=Array.isArray(payload.items)?payload.items.find(entry=>String(entry?.crownId||entry?.crown?.id||entry?.crownEvent?.id||"")===crownId):null;
-    if(item)crownConfirmedById.set(crownId,item);
-    else crownConfirmedById.delete(crownId);
-    crownRenderedSignature="";
-    crownRender(crownLatestState);
-  }catch(error){
-    // A missing merge record is expected for ordinary unconfirmed Crown events.
-  }finally{
-    crownConfirmedLoading.delete(crownId);
-  }
 }
 async function crownLoadExtra(event){
   const gid=String(event&&event.id||"");

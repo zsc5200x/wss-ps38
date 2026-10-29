@@ -29,3 +29,13 @@ league-radar-desktop.png
 # Temporary local backups used while consolidating nested repositories.
 .crown-worktree-backup/
 .crown-git-backup/
+
+# Consolidated local runtime files, never source control
+var/
+.runtime-migration.lock
+
+# Compatibility symlinks retained for legacy scripts
+.run
+logs
+backups
+crown/data

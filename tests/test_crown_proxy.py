@@ -46,12 +46,15 @@ class CrownProxyTests(unittest.TestCase):
         for path in (
             "/crown", "/crown/", "/crown/static/app.css", "/crown/static/app.js",
             "/api/crown", "/api/crown/events",
+            "/crown/static/modules/confirmed-markets.js",
         ):
             with self.subTest(path=path):
                 self.assertTrue(crown_proxy.is_crown_path(path))
         for path in (
             "/", "/api/snapshot", "/api/crownish/events",
             "/crown/static/secret.txt", "/crown/static/../app.py",
+            "/crown/static/modules/%2e%2e/app.js",
+            "/crown/static/modules/../../app.py",
         ):
             with self.subTest(path=path):
                 self.assertFalse(crown_proxy.is_crown_path(path))

@@ -222,6 +222,8 @@ class DashboardStoreTests(unittest.TestCase):
 
     def test_reloads_repaired_metadata_into_live_rows(self):
         store = self.make_store()
+        captured_at = datetime.now().astimezone().isoformat()
+        kickoff = (datetime.now().astimezone() - timedelta(minutes=20)).isoformat()
         payload = {
             "type": "UPDATE_ODDS",
             "odds": {
@@ -237,7 +239,7 @@ class DashboardStoreTests(unittest.TestCase):
         store.process_line(
             json.dumps(
                 {
-                    "captured_at": "2026-10-28T05:00:00.000+08:00",
+                    "captured_at": captured_at,
                     "opcode": 1,
                     "payload": json.dumps(payload),
                 }
@@ -261,9 +263,9 @@ class DashboardStoreTests(unittest.TestCase):
                 (
                     "Home VS Away",
                     "Test League",
-                    "2026-10-29T20:00:00+08:00",
-                    "2026-10-28T05:00:00.000+08:00",
-                    "2026-10-28T05:01:00.000+08:00",
+                    kickoff,
+                    captured_at,
+                    captured_at,
                 ),
             )
 
@@ -794,7 +796,10 @@ class DashboardHomeUiTests(unittest.TestCase):
             self.assertNotIn(removed, html)
 
     def test_dashboard_manages_both_crown_frames(self):
-        script = Path("dashboard/static/app.js").read_text(encoding="utf-8")
+        script = "\n".join(
+            Path("dashboard/static/modules", name).read_text(encoding="utf-8")
+            for name in ("dom.js", "router.js", "router-bindings.js")
+        )
         self.assertIn('document.querySelectorAll("[data-crown-frame]")', script)
         self.assertIn("function activeCrownFrame()", script)
         self.assertIn("function syncCrownFrameActivity()", script)

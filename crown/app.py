@@ -1,11 +1,19 @@
 import json
+import signal
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+from project_config import load_config
 
 from crown_runtime import (
+    close as close_crown,
     account_action,
     add_account,
     initialize as initialize_crown,
@@ -43,8 +51,9 @@ def _crown_retry_delay(result):
     return CROWN_FAILURE_BACKOFF_SECONDS[index]
 
 
-def crown_refresh_loop():
-    while True:
+def crown_refresh_loop(stop_event=None):
+    stop_event = stop_event or threading.Event()
+    while not stop_event.is_set():
         refresh_started = time.monotonic()
         try:
             result = refresh_once()
@@ -57,7 +66,7 @@ def crown_refresh_loop():
             crown_state["diagnostics"] = diagnostics
         remaining = delay - (time.monotonic() - refresh_started)
         if remaining > 0:
-            time.sleep(remaining)
+            stop_event.wait(remaining)
 
 
 def _compact_market_items(items, *, include_extra_fields=False):
@@ -204,14 +213,20 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(payload)
             return
         if path.startswith("/crown/static/"):
-            name = path.rsplit("/", 1)[-1]
-            content_type = STATIC_ASSETS.get(name)
-            if content_type is None:
+            relative = unquote(path[len("/crown/static/"):])
+            parts = relative.split("/")
+            module = relative.startswith("modules/") and relative.endswith(".js")
+            content_type = STATIC_ASSETS.get(relative)
+            if module:
+                content_type = "text/javascript; charset=utf-8"
+            if content_type is None or any(part in {"", ".", ".."} or "\\" in part for part in parts):
                 self.send_error(404)
                 return
+            candidate = (STATIC_DIR / relative).resolve()
             try:
-                body = (STATIC_DIR / name).read_bytes()
-            except OSError:
+                candidate.relative_to(STATIC_DIR.resolve())
+                body = candidate.read_bytes()
+            except (OSError, ValueError):
                 self.send_error(404)
                 return
             self.send_response(200)
@@ -309,16 +324,38 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print("[%s] %s" % (self.log_date_time_string(), fmt % args))
 
-if __name__ == "__main__":
-    initialize_crown()
-    threading.Thread(target=crown_refresh_loop, daemon=True).start()
-    print("皇冠赛事网页已启动")
-    print("本机访问：http://127.0.0.1:8887")
-    print("停止服务：按 Control + C")
-    server = ThreadingHTTPServer((HOST, PORT), Handler)
+def main():
+    config = load_config()
+    host = str(config.get("crown_host") or HOST)
+    port = int(config.get("crown_port") or PORT)
+    stop_event = threading.Event()
+    worker = None
+    server = ThreadingHTTPServer((host, port), Handler)
+
+    def handle_sigterm(signum, frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, handle_sigterm)
     try:
+        initialize_crown()
+        worker = threading.Thread(
+            target=crown_refresh_loop, args=(stop_event,),
+            name="crown-refresh", daemon=True,
+        )
+        worker.start()
+        print("皇冠赛事网页已启动")
+        print(f"本机访问：http://{host}:{port}")
+        print("停止服务：按 Control + C")
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         server.server_close()
+        stop_event.set()
+        if worker is not None and worker.ident is not None:
+            worker.join()
+        close_crown()
+
+
+if __name__ == "__main__":
+    main()

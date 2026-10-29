@@ -11,7 +11,7 @@ from __future__ import annotations
 import http.client
 import json
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 CROWN_HOST = "127.0.0.1"
 CROWN_PORT = 8887
@@ -28,8 +28,14 @@ FORWARD_RESPONSE_HEADERS = (
 
 def is_crown_path(path: str) -> bool:
     """Return whether *path* belongs to the Crown page or its API."""
+    decoded = unquote(path)
+    module_path = decoded.startswith("/crown/static/modules/") and decoded.endswith(".js")
+    valid_module = module_path and all(
+        part not in {"", ".", ".."} and "\\" not in part
+        for part in decoded[len("/crown/static/"):].split("/")
+    )
     return (
-        path in {
+        valid_module or path in {
             "/crown", "/crown/", "/crown/static/app.css", "/crown/static/app.js",
             "/api/crown",
         }
@@ -75,7 +81,7 @@ def _send_upstream_unavailable(handler: Any) -> None:
 
 
 def proxy_crown(handler: Any, method: str) -> None:
-    """Forward the current request to Crown using a hard-coded local target.
+    """Forward the current request to the configured Crown service target.
 
     Only fixed Crown page/API paths are accepted.  There is deliberately no
     user-controlled upstream URL, which keeps this from becoming an SSRF path.
@@ -110,8 +116,11 @@ def proxy_crown(handler: Any, method: str) -> None:
 
     connection = None
     try:
+        config = getattr(handler, "config", {})
         connection = http.client.HTTPConnection(
-            CROWN_HOST, CROWN_PORT, timeout=CROWN_TIMEOUT_SECONDS
+            str(config.get("crown_host") or CROWN_HOST),
+            int(config.get("crown_port") or CROWN_PORT),
+            timeout=CROWN_TIMEOUT_SECONDS,
         )
         connection.request(method, target, body=body, headers=request_headers)
         response = connection.getresponse()

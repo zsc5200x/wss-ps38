@@ -1,9 +1,17 @@
-"""Shared project configuration and path resolution helpers."""
+"""Shared configuration: environment overrides > selected JSON file > defaults.
+
+The optional default config.json may be absent. An explicitly selected config
+file must exist, so a typo cannot silently launch another browser or database.
+"""
 
 from __future__ import annotations
 
+import argparse
+import copy
 import json
 import os
+import shlex
+import sys
 from pathlib import Path
 from typing import Any, Dict
 
@@ -13,6 +21,7 @@ DEFAULT_CONFIG_PATH = PROJECT_DIR / "config.json"
 
 DEFAULTS: Dict[str, Any] = {
     "cdp_url": "http://127.0.0.1:9222",
+    "crown_cdp_url": "",
     "chrome_binary": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "chrome_profile_dir": "~/.ps3838-wss-chrome-profile",
     "start_url": "https://www.ps3838.com/zh-cn/sports/soccer",
@@ -23,7 +32,15 @@ DEFAULTS: Dict[str, Any] = {
     "latest_output_file": "latest_odds_10_matches.csv",
     "normalized_output_file": "latest_odds_normalized.csv",
     "dashboard_db_path": "odds_history.sqlite3",
+    "merge_db_path": "fixture_merge.sqlite3",
+    "dashboard_host": "127.0.0.1",
+    "dashboard_port": 8787,
+    "crown_host": "127.0.0.1",
+    "crown_port": 8887,
     "backup_dir": "backups",
+    "run_dir": ".run",
+    "log_dir": "logs",
+    "crown_data_dir": "crown/data",
     "backup_keep": 7,
     "capture_compress_after_hours": 24,
     "capture_compress_min_mb": 16,
@@ -32,51 +49,107 @@ DEFAULTS: Dict[str, Any] = {
     "capture_rotation_mb": 0,
 }
 
+# The first nonempty alias wins; source-specific overrides precede shared ones.
+ENV_OVERRIDES = {
+    "cdp_url": ("CAPTURE_CDP_URL", "CDP_URL"),
+    "crown_cdp_url": ("CROWN_CDP_URL",),
+    "capture_path": ("CAPTURE_OUTPUT", "CAPTURE_PATH"),
+    "events_file": ("EVENTS_FILE",),
+    "live_snapshot_file": ("LIVE_SNAPSHOT_FILE",),
+    "dashboard_db_path": ("DASHBOARD_DB_PATH",),
+    "merge_db_path": ("MERGE_DB_PATH", "FIXTURE_MERGE_DB_PATH"),
+    "backup_dir": ("BACKUP_DIR",),
+    "run_dir": ("RUN_DIR",),
+    "log_dir": ("LOG_DIR",),
+    "crown_data_dir": ("CROWN_DATA_DIR",),
+    "chrome_binary": ("CHROME_BINARY",),
+    "chrome_profile_dir": ("CHROME_PROFILE_DIR",),
+    "start_url": ("START_URL",),
+    "target_hosts": ("CAPTURE_TARGET_HOSTS",),
+    "dashboard_host": ("DASHBOARD_HOST",),
+    "dashboard_port": ("DASHBOARD_PORT",),
+    "crown_host": ("CROWN_HOST",),
+    "crown_port": ("CROWN_PORT",),
+    "dashboard_url": ("CAPTURE_DASHBOARD_URL",),
+    "presence_interval_seconds": ("CAPTURE_PRESENCE_INTERVAL_SECONDS",),
+}
+
+PATH_ALIASES = {
+    "events_file": ("events_path",),
+    "live_snapshot_file": ("output",),
+    "latest_output_file": ("latest_output",),
+    "normalized_output_file": ("normalized_output",),
+    "merge_db_path": ("fixture_merge_db_path",),
+}
+
 
 def config_path() -> Path:
-    """Return the active configuration file path."""
-    return Path(
-        os.environ.get("PS3838_CONFIG", str(DEFAULT_CONFIG_PATH))
-    ).expanduser()
+    """Resolve the selected config relative to the project, not shell cwd."""
+    path = Path(os.environ.get("PS3838_CONFIG") or DEFAULT_CONFIG_PATH).expanduser()
+    return path if path.is_absolute() else PROJECT_DIR / path
+
+
+def _port(value: Any, key: str) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"配置 {key} 必须是 1–65535 的端口号") from exc
+    if isinstance(value, bool) or str(value).strip() != str(number) or not 1 <= number <= 65535:
+        raise RuntimeError(f"配置 {key} 必须是 1–65535 的端口号")
+    return number
 
 
 def load_config() -> Dict[str, Any]:
-    """Load config.json when present and merge it over project defaults."""
-    config = dict(DEFAULTS)
+    """Load shared defaults, selected JSON, then explicit environment overrides."""
+    config = copy.deepcopy(DEFAULTS)
     active_path = config_path()
-
-    if active_path.exists():
+    loaded: Dict[str, Any] = {}
+    if active_path.exists() or os.environ.get("PS3838_CONFIG"):
         try:
             with active_path.open(encoding="utf-8") as handle:
                 loaded = json.load(handle)
             if not isinstance(loaded, dict):
                 raise ValueError("顶层必须是 JSON 对象")
-            config.update(loaded)
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError) as exc:
             raise RuntimeError(f"无法读取配置文件 {active_path}: {exc}") from exc
-
+    for key, aliases in PATH_ALIASES.items():
+        if not loaded.get(key):
+            for alias in aliases:
+                if loaded.get(alias):
+                    loaded[key] = loaded[alias]
+                    break
+    if not loaded.get("start_url") and loaded.get("target_url"):
+        loaded["start_url"] = loaded["target_url"]
+    config.update(loaded)
+    for key, names in ENV_OVERRIDES.items():
+        for name in names:
+            if os.environ.get(name):
+                config[key] = os.environ[name]
+                break
+    for source in ("dashboard", "crown"):
+        key = f"{source}_host"
+        host = str(config[key]).strip()
+        if not host or any(char.isspace() for char in host) or "/" in host:
+            raise RuntimeError(f"配置 {key} 必须是有效主机名或 IP 地址")
+        config[key] = host
+        config[f"{source}_port"] = _port(config[f"{source}_port"], f"{source}_port")
+    config["crown_cdp_url"] = config.get("crown_cdp_url") or config["cdp_url"]
+    config["fixture_merge_db_path"] = config["merge_db_path"]
+    config["dashboard_url"] = config.get("dashboard_url") or service_url(config, "dashboard")
     return config
 
 
 def resolve_path(value: Any, fallback: str) -> Path:
-    """Resolve a config path relative to the project directory when needed."""
-    raw = value or fallback
-    path = Path(str(raw)).expanduser()
+    """Resolve runtime paths relative to the project, preserving legacy layout."""
+    path = Path(str(value or fallback)).expanduser()
     return path if path.is_absolute() else PROJECT_DIR / path
 
 
 def get_path(config: Dict[str, Any], key: str) -> Path:
-    aliases = {
-        "events_file": ("events_file", "events_path"),
-        "live_snapshot_file": ("live_snapshot_file", "output"),
-        "latest_output_file": ("latest_output_file", "latest_output"),
-        "normalized_output_file": (
-            "normalized_output_file",
-            "normalized_output",
-        ),
-    }
+    if key == "fixture_merge_db_path":
+        key = "merge_db_path"
     fallback = DEFAULTS[key]
-    for candidate in aliases.get(key, (key,)):
+    for candidate in (key,) + PATH_ALIASES.get(key, ()):
         if config.get(candidate):
             return resolve_path(config[candidate], str(fallback))
     return resolve_path(fallback, str(fallback))
@@ -89,3 +162,61 @@ def target_hosts(config: Dict[str, Any]):
     if not isinstance(value, list):
         value = DEFAULTS["target_hosts"]
     return tuple(str(item).strip().lower().lstrip(".") for item in value if str(item).strip())
+
+
+def service_url(config: Dict[str, Any], source: str, *, connect: bool = True) -> str:
+    """Return HTTP origin; readiness checks connect to loopback for wildcard binds."""
+    if source not in {"dashboard", "crown"}:
+        raise ValueError("未知服务")
+    host = str(config.get(f"{source}_host") or DEFAULTS[f"{source}_host"])
+    if connect and host in {"0.0.0.0", "::"}:
+        host = "127.0.0.1" if host == "0.0.0.0" else "::1"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"http://{host}:{config.get(f'{source}_port', DEFAULTS[f'{source}_port'])}"
+
+
+def shell_config(config: Dict[str, Any]) -> str:
+    """Emit only known launcher variables, escaped as shell assignments."""
+    values = {
+        "PS3838_CONFIG": str(config_path()) if config_path().exists() or os.environ.get("PS3838_CONFIG") else "",
+        "CDP_URL": config["cdp_url"],
+        "CAPTURE_CDP_URL": config["cdp_url"],
+        "CROWN_CDP_URL": config["crown_cdp_url"],
+        "CHROME_BINARY": str(resolve_path(config["chrome_binary"], DEFAULTS["chrome_binary"])),
+        "CHROME_PROFILE_DIR": str(resolve_path(config["chrome_profile_dir"], DEFAULTS["chrome_profile_dir"])),
+        "START_URL": config["start_url"],
+        "CAPTURE_DASHBOARD_URL": config["dashboard_url"],
+        "CAPTURE_TARGET_HOSTS": ",".join(target_hosts(config)),
+        "DASHBOARD_HOST": config["dashboard_host"],
+        "DASHBOARD_PORT": config["dashboard_port"],
+        "CROWN_HOST": config["crown_host"],
+        "CROWN_PORT": config["crown_port"],
+        "DASHBOARD_URL": service_url(config, "dashboard"),
+        "CROWN_URL": service_url(config, "crown"),
+    }
+    for variable, key in {
+        "CAPTURE_PATH": "capture_path", "CAPTURE_OUTPUT": "capture_path",
+        "EVENTS_FILE": "events_file", "LIVE_SNAPSHOT_FILE": "live_snapshot_file",
+        "DASHBOARD_DB_PATH": "dashboard_db_path", "MERGE_DB_PATH": "merge_db_path",
+        "BACKUP_DIR": "backup_dir", "RUN_DIR": "run_dir",
+        "LOG_DIR": "log_dir", "CROWN_DATA_DIR": "crown_data_dir",
+    }.items():
+        values[variable] = str(get_path(config, key))
+    return "\n".join(f"export {name}={shlex.quote(str(value))}" for name, value in values.items())
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="项目配置的统一启动入口")
+    parser.add_argument("command", choices=["shell"])
+    parser.parse_args()
+    try:
+        print(shell_config(load_config()))
+    except (RuntimeError, ValueError, KeyError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

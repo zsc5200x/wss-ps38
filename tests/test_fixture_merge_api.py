@@ -179,7 +179,8 @@ class FixtureMergeApiTests(unittest.TestCase):
         self.assertEqual(item["pinnacle"]["id"], "100")
         self.assertEqual(item["pinnacle"]["odds"][0]["hongKong"], 0.91)
 
-        status, payload = self._request("/api/merge/confirmed?crownId=missing")
+        with patch.object(DashboardHandler, "_crown_fixture_events", return_value=([crown_event], None)):
+            status, payload = self._request("/api/merge/confirmed?crownId=missing")
         self.assertEqual(status, 200)
         self.assertEqual(payload["items"], [])
 

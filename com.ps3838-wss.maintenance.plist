@@ -1,17 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
+<!-- Template only. install_maintenance.sh injects current project, Python and log paths. -->
 <dict>
   <key>Label</key>
   <string>com.ps3838-wss.maintenance</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/Users/zsc5200x/ps3838-wss/.venv/bin/python</string>
-    <string>-u</string>
-    <string>/Users/zsc5200x/ps3838-wss/maintenance.py</string>
-  </array>
-  <key>WorkingDirectory</key>
-  <string>/Users/zsc5200x/ps3838-wss</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
@@ -24,10 +17,6 @@
     <key>Minute</key>
     <integer>15</integer>
   </dict>
-  <key>StandardOutPath</key>
-  <string>/Users/zsc5200x/ps3838-wss/logs/maintenance.log</string>
-  <key>StandardErrorPath</key>
-  <string>/Users/zsc5200x/ps3838-wss/logs/maintenance.log</string>
   <key>ProcessType</key>
   <string>Background</string>
   <key>ThrottleInterval</key>

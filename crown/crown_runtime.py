@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 import json
 import os
+import sys
 from pathlib import Path
 import tempfile
 import threading
@@ -16,7 +17,12 @@ from event_filters import is_excluded_league
 
 
 ROOT = Path(__file__).resolve().parent
-DATA_DIR = ROOT / "data"
+PROJECT_ROOT = ROOT.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+from project_config import get_path, load_config
+
+DATA_DIR = get_path(load_config(), "crown_data_dir")
 EVENTS_CACHE_PATH = DATA_DIR / "events-cache.json"
 EVENTS_CACHE_VERSION = 1
 EVENTS_CACHE_MAX_BYTES = 16 * 1024 * 1024
@@ -81,9 +87,11 @@ _more_sources = {"client": None, "raw_format": None, "games": {}}
 _more_refresh_lock = threading.Lock()
 _refresh_lock = threading.Lock()
 _last_snapshot_monotonic = None
+_more_refresh_thread = None
 
 
 def _configure_browser():
+    os.environ["CROWN_CDP_URL"] = str(load_config()["crown_cdp_url"])
     # Use the user's installed browser when Playwright's bundled Chromium is
     # not present. This setting is local to this process.
     chrome = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
@@ -634,6 +642,7 @@ def _select_more_refresh_batch(expired, raw_format=None):
 
 
 def _start_more_markets_refresh(client, games, raw_format):
+    global _more_refresh_thread
     if not games or not callable(getattr(client, "game_more", None)):
         return False
     now = time.monotonic()
@@ -672,11 +681,13 @@ def _start_more_markets_refresh(client, games, raw_format):
             _more_refresh_lock.release()
 
     try:
-        threading.Thread(
+        worker = threading.Thread(
             target=refresh_details,
             name="crown-more-refresh",
             daemon=True,
-        ).start()
+        )
+        _more_refresh_thread = worker
+        worker.start()
     except Exception:
         with lock:
             diagnostics = dict(state.get("diagnostics") or {})
@@ -936,7 +947,11 @@ def _normalize_event(game, mode, display_format="HK", raw_format="CROWN_HK", mor
 
 
 def close():
-    global store, auth, monitor
+    global store, auth, monitor, _more_refresh_thread
+    worker = _more_refresh_thread
+    if worker is not None and worker.ident is not None and worker is not threading.current_thread():
+        worker.join()
+    _more_refresh_thread = None
     if monitor is not None:
         monitor.close()
     if auth is not None:

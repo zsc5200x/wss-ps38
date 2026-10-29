@@ -49,8 +49,8 @@ class CrownApiTests(unittest.TestCase):
         self.assertEqual(headers["Cache-Control"], "no-store, no-cache, must-revalidate")
         self.assertIn("皇冠赛事", body)
         self.assertIn('href="/crown"', body)
-        self.assertIn('href="/crown/static/app.css"', body)
-        self.assertIn('src="/crown/static/app.js"', body)
+        self.assertRegex(body, r'href="/crown/static/app[.]css(?:[?][^"]*)?"')
+        self.assertRegex(body, r'<script type="module" src="/crown/static/app[.]js(?:[?][^"]*)?"')
         self.assertNotIn("crownPassword", body)
         self.assertNotIn("crownTotp", body)
         self.assertNotIn("TOTP 密钥", body)
@@ -61,7 +61,7 @@ class CrownApiTests(unittest.TestCase):
         status, _headers, body = self.request("GET", "/crown?embed=1")
         self.assertEqual(status, 200)
         self.assertIn('<body class="crown-embedded">', body)
-        self.assertIn('src="/crown/static/app.js"', body)
+        self.assertRegex(body, r'<script type="module" src="/crown/static/app[.]js(?:[?][^"]*)?"')
 
         status, headers, script = self.request("GET", "/crown/static/app.js")
         self.assertEqual(status, 200)
@@ -72,6 +72,15 @@ class CrownApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(headers["Content-Type"], "text/css; charset=utf-8")
         self.assertIn("body.crown-embedded .topbar", stylesheet)
+
+    def test_crown_modules_are_served_without_exposing_parent_paths(self):
+        status, headers, script = self.request("GET", "/crown/static/modules/confirmed-markets.js")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "text/javascript; charset=utf-8")
+        self.assertIn("createConfirmedMarkets", script)
+        for path in ("/crown/static/modules/../../app.py", "/crown/static/modules/%2e%2e/app.js", "/crown/static/modules/missing.js"):
+            status, _, _ = self.request("GET", path)
+            self.assertEqual(status, 404)
 
     def test_fixtures_mode_hides_duplicate_shell_chrome(self):
         status, _headers, body = self.request("GET", "/crown?embed=1&fixtures=1")

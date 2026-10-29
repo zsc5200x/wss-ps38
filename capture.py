@@ -63,6 +63,8 @@ def _load_settings():
     output_path = Path(output_value).expanduser()
     if not output_path.is_absolute():
         output_path = PROJECT_DIR / output_path
+    # Migration leaves a compatibility symlink; rotate the actual data file.
+    output_path = output_path.resolve()
 
     configured_hosts = config.get("target_hosts")
     if isinstance(configured_hosts, str):
