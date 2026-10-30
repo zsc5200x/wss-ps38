@@ -101,6 +101,25 @@ export function createConfirmedMarkets({ enabled = false, escapeHtml, onChange =
       &&canonicalLine(item?.line)===key);
     if(!row){
       const fallback=nearestRow(rows,market,option,line);
+      let alternate=null;
+      if(fallback){
+        const fallbackQuoted=rowIsQuoted(fallback);
+        const fallbackLast=fallbackQuoted?"":crownPinnaclePrice({
+          ...fallback,
+          quoted:true,
+          hongKong:fallback.lastHongKong,
+          hongKongLabel:fallback.lastHongKongLabel,
+        });
+        alternate={
+          line:orientedLineText(fallback.line,String(market)),
+          price:crownPinnaclePrice(fallback),
+          quoted:fallbackQuoted,
+          capturedAt:String(fallback?.capturedAt||""),
+          // Keep the nearest line useful while Pinnacle has that row suspended.
+          lastPrice:fallbackLast!=="—"?fallbackLast:"",
+          lastCapturedAt:String(fallback?.lastQuotedAt||""),
+        };
+      }
       return {
         price:"—",
         line:orientedLineText(line,String(market)),
@@ -110,17 +129,22 @@ export function createConfirmedMarkets({ enabled = false, escapeHtml, onChange =
         capturedAt:"",
         direction:"",
         delta:null,
-        alternate:fallback?{
-          line:orientedLineText(fallback.line,String(market)),
-          price:crownPinnaclePrice(fallback),
-          quoted:rowIsQuoted(fallback),
-          capturedAt:String(fallback?.capturedAt||""),
-        }:null,
+        alternate,
       };
     }
     const actualLine=orientedLineText(row.line,String(market));
     const quoted=rowIsQuoted(row);
-    return {
+    // Pinnacle suspends a selection by sending an empty price. The store keeps
+    // the last quoted water so the paired card can keep showing a number with a
+    // "suspended" badge instead of dropping to a bare dash between ticks.
+    const lastPrice=quoted?"":crownPinnaclePrice({
+      ...row,
+      quoted:true,
+      hongKong:row.lastHongKong,
+      hongKongLabel:row.lastHongKongLabel,
+    });
+    const hasLast=!quoted&&lastPrice!=="—";
+    const quote = {
       price:quoted?crownPinnaclePrice(row):"—",
       line:actualLine,
       lineDiff:canonicalLine(actualLine)!==canonicalLine(line),
@@ -132,6 +156,14 @@ export function createConfirmedMarkets({ enabled = false, escapeHtml, onChange =
       direction:quoted?String(row?.direction||"flat"):"",
       delta:quoted&&row?.delta!=null?Number(row.delta):null,
     };
+    // Only a suspended selection carries the extra "last usable water" fields,
+    // so the quoted shape stays unchanged for existing consumers.
+    if(hasLast){
+      quote.lastPrice=lastPrice;
+      quote.lastCapturedAt=String(row?.lastQuotedAt||"");
+      quote.suspended=true;
+    }
+    return quote;
   }
   function crownConfirmedSummary(confirmed,event){
     if(!confirmed)return "";

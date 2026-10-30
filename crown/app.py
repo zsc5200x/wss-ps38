@@ -109,8 +109,9 @@ def _compact_crown_event(event):
     result = {
         key: event.get(key)
         for key in (
-            "id", "league_id", "league", "is_live", "home", "away",
-            "start_label", "score", "minute", "period", "odds_format_label",
+            "id", "league_id", "league", "is_live", "is_finished", "home",
+            "away", "start_label", "score", "minute", "period",
+            "odds_format_label",
         )
     }
     result["markets"] = {

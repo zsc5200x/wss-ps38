@@ -172,11 +172,19 @@ def _similarity(left: Any, right: Any) -> float:
     return _ratio(normalize_name(left), normalize_name(right))
 
 
-def _alias_hit(left: Any, right: Any, aliases: set | None, normalize) -> bool:
+def _alias_hit(
+    left: Any, right: Any, aliases: set | None, normalize, *, symmetric: bool = True
+) -> bool:
     if not aliases:
         return False
     a, b = normalize(left), normalize(right)
-    return bool(a and b and ((a, b) in aliases or (b, a) in aliases))
+    if not a or not b:
+        return False
+    if symmetric:
+        return (a, b) in aliases or (b, a) in aliases
+    # League aliases are directional: 甲级 and 乙级 must never match just
+    # because a confirmed pair happens to be stored in the opposite order.
+    return (a, b) in aliases
 
 
 def _team_similarity(left: Any, right: Any, aliases: set | None = None) -> float:
@@ -186,7 +194,7 @@ def _team_similarity(left: Any, right: Any, aliases: set | None = None) -> float
 
 
 def _league_similarity(left: Any, right: Any, aliases: set | None = None) -> float:
-    if _alias_hit(left, right, aliases, normalize_league):
+    if _alias_hit(left, right, aliases, normalize_league, symmetric=False):
         return 1.0
     return _ratio(normalize_league(left), normalize_league(right))
 
@@ -235,6 +243,7 @@ def prepare_pinnacle_event(event: dict[str, Any]) -> dict[str, Any]:
         "normalizedTimezone": _timezone_name(MERGE_DISPLAY_TIMEZONE),
         "sourceTimezone": _timezone_name(PINNACLE_TIMEZONE),
         "isLive": bool(event.get("isLive")),
+        "lastCapturedAt": str(event.get("lastCapturedAt") or ""),
         "scoreHome": str(event.get("scoreHome") or ""),
         "scoreAway": str(event.get("scoreAway") or ""),
         "minute": str(event.get("matchMinute", event.get("minute")) or ""),
@@ -258,6 +267,7 @@ def prepare_crown_event(event: dict[str, Any]) -> dict[str, Any]:
         "normalizedTimezone": _timezone_name(MERGE_DISPLAY_TIMEZONE),
         "sourceTimezone": _timezone_name(CROWN_TIMEZONE),
         "isLive": bool(event.get("isLive", event.get("is_live"))),
+        "isFinished": bool(event.get("isFinished", event.get("is_finished"))),
         "score": str(event.get("score") or ""),
         "minute": str(event.get("minute") or ""),
     }
@@ -795,7 +805,7 @@ def rank_league_candidates(
                 pinnacle_country and crown_country and pinnacle_country == crown_country
             )
             name_score = _league_similarity(
-                crown_league["name"], pinnacle_league["name"], league_aliases
+                pinnacle_league["name"], crown_league["name"], league_aliases
             )
             evidence = sorted(
                 event_evidence.get((crown_id, pinnacle_id), []), reverse=True
@@ -810,24 +820,30 @@ def rank_league_candidates(
                 reasons.append("联赛名称相似")
             elif name_score >= 0.35:
                 reasons.append("联赛名称部分相似")
-            if _alias_hit(crown_league["name"], pinnacle_league["name"], league_aliases, normalize_league):
+            if _alias_hit(
+                pinnacle_league["name"], crown_league["name"], league_aliases, normalize_league,
+                symmetric=False,
+            ):
                 reasons.append("命中已确认的联赛别名")
             if same_country:
                 score += 8.0
                 reasons.append(f"同一国家（{crown_country}）")
-            count_score = event_count_score(
-                int(crown_league.get("eventCount") or 0),
-                int(pinnacle_league.get("eventCount") or 0),
-            )
+            crown_count = int(crown_league.get("eventCount") or 0)
+            pinnacle_count = int(pinnacle_league.get("eventCount") or 0)
+            count_score = event_count_score(crown_count, pinnacle_count)
             if count_score:
                 score += 14.0 * count_score
                 if count_score >= 0.999:
-                    reasons.append(f"赛事数量一致（{crown_league.get('eventCount')} 场）")
+                    reasons.append(f"赛事数量一致（{crown_count} 场）")
                 else:
                     reasons.append(
-                        f"赛事数量接近（{crown_league.get('eventCount')} / "
-                        f"{pinnacle_league.get('eventCount')} 场）"
+                        f"赛事数量接近（{crown_count} / {pinnacle_count} 场）"
                     )
+            elif crown_count and pinnacle_count and abs(crown_count - pinnacle_count) >= 3:
+                # 3-vs-7 is a strong signal that these are different tiers, not
+                # merely incomplete feed coverage.
+                score -= 12.0
+                reasons.append(f"赛事数量差异较大（{crown_count} / {pinnacle_count} 场）")
             if len(evidence) >= 2:
                 reasons.append(f"组内有 {len(evidence)} 场赛事候选吻合")
             elif evidence:
@@ -835,7 +851,7 @@ def rank_league_candidates(
             ranked.append({
                 "crownLeagueId": crown_id,
                 "pinnacleLeagueId": pinnacle_id,
-                "score": round(min(100.0, score), 1),
+                "score": round(min(100.0, max(0.0, score)), 1),
                 "baseScore": round(min(100.0, base_score), 1),
                 "evidenceCount": len(evidence),
                 "reasons": reasons or ["可人工核对联赛和组内赛事"],

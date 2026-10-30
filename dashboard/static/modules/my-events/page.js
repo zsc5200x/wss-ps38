@@ -182,11 +182,6 @@ function renderAgentOptions() {
   const select = $("myEventsAgent");
   if (!select) return;
   const agents = myEvents().agents || [];
-  const subtitle = $("myEventsSubtitle");
-  if (subtitle && agents.length) {
-    const label = { OPEN: "未结算订单", SETTLED: "已结算订单", ALL: "全部订单" }[myEvents().status] || "全部订单";
-    subtitle.textContent = `${label} · ${agents.map((agent) => agent.code).join(" / ")}`;
-  }
   const signature = agents.map((agent) => agent.code).join(",");
   if (select.dataset.signature === signature) return;
   select.dataset.signature = signature;
@@ -206,13 +201,10 @@ function setStat(id, text, tone = "") {
   if (tone) node.classList.add(tone);
 }
 
-function renderAgents(agents, payload = {}) {
+function renderAgents(agents) {
   const box = $("myEventsAgents");
   if (!box) return;
   box.replaceChildren();
-  let stakeSum = 0;
-  let netSum = 0;
-  let orderSum = 0;
   for (const agent of agents) {
     const card = el("article", "my-events-agent");
     card.append(el("span", "my-events-agent-code", agent.agent_code || "—"));
@@ -227,19 +219,6 @@ function renderAgents(agents, payload = {}) {
     else if (net < 0) foot.classList.add("negative");
     card.append(foot);
     box.append(card);
-    stakeSum += Number(agent.stake) || 0;
-    netSum += net || 0;
-    orderSum += Number(agent.orders) || 0;
-  }
-  const total = $("myEventsAgentTotal");
-  if (total) {
-    const totalStake = Number(payload.total_stake) || 0;
-    const diff = Math.abs(stakeSum - totalStake);
-    total.classList.toggle("mismatch", agents.length > 0 && diff > 0.01);
-    total.textContent = agents.length
-      ? `${agents.length} 个代理合计 · ${formatNumber(orderSum)} 单 · 投注 ${formatMoney(stakeSum)} · 输赢 ${formatSigned(netSum)}`
-        + (diff > 0.01 ? ` · 与顶部差 ${formatMoney(diff)}` : "")
-      : "";
   }
 }
 
@@ -263,20 +242,7 @@ function renderSummary(payload) {
   setStat("myEventsOpenStake", formatMoney(payload.open_stake));
   setStat("myEventsSettledCount", formatNumber(payload.settled));
   setStat("myEventsSettledStake", formatMoney(payload.settled_stake));
-  renderAgents(payload.agents || [], payload);
-  const scope = $("myEventsScope");
-  if (scope) {
-    const current = myEvents();
-    const agent = current.agent ? ` · ${current.agent}` : "";
-    const basisLabel = current.basis === "settled" ? "结算时间" : "下单时间";
-    const tzLabel = Number(current.tz) === -240 ? "GMT-4" : "GMT+8";
-    let rangeLabel = "全部时间";
-    if (current.from && current.to && current.from === current.to) rangeLabel = current.from;
-    else if (current.from || current.to) {
-      rangeLabel = `${current.from || "开始"} ~ ${current.to || "现在"}`;
-    }
-    scope.textContent = `${basisLabel} · ${tzLabel} · ${rangeLabel}${agent}`;
-  }
+  renderAgents(payload.agents || []);
 }
 
 function summaryQuery() {

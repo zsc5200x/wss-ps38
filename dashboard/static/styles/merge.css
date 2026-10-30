@@ -116,12 +116,6 @@
   background: var(--accent-soft);
 }
 
-.merge-policy {
-  padding: 2px 0 13px;
-  color: var(--muted);
-  font-size: 0.72rem;
-}
-
 .merge-error {
   margin: 6px 0 12px;
   padding: 10px 12px;
@@ -181,6 +175,21 @@
 
 .merge-league-heading-toggle:disabled {
   opacity: 0.85;
+}
+
+.merge-league-identity {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  overflow-wrap: anywhere;
+}
+
+.merge-league-paired-identity {
+  padding-left: 12px;
+  border-left: 1px solid var(--border-strong);
 }
 
 .merge-league-heading h2,

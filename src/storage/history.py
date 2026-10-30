@@ -362,6 +362,41 @@ class HistoryDatabase:
         ]
         return points, truncated
 
+    def latest_points(self, event_id: str) -> Dict[Tuple[str, str, str, str], Dict[str, Any]]:
+        """Latest persisted quote per (stage, market, option, line).
+
+        Used by the confirmed-fixture card to recover the last usable water
+        after a restart, when the in-memory row was rebuilt from a suspension
+        tick and lost its previous quote.
+        """
+        key = str(event_id or "").strip()
+        if not key:
+            return {}
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT stage, market, option, line, captured_at, decimal, hong_kong
+                FROM odds_history
+                WHERE event_id = ? AND id IN (
+                    SELECT MAX(id) FROM odds_history
+                    WHERE event_id = ?
+                    GROUP BY stage, market, option, line
+                )
+                """,
+                (key, key),
+            ).fetchall()
+        return {
+            (
+                str(row["stage"]), str(row["market"]),
+                str(row["option"]), str(row["line"]),
+            ): {
+                "capturedAt": str(row["captured_at"]),
+                "decimal": row["decimal"],
+                "hongKong": row["hong_kong"],
+            }
+            for row in rows
+        }
+
     def disk_bytes(self) -> int:
         total = 0
         for suffix in ("", "-wal", "-shm"):

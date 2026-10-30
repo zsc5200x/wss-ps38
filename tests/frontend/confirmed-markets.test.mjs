@@ -86,6 +86,30 @@ test("matches selection-specific away handicap and quarter-goal totals", () => {
   });
 });
 
+test("a suspended selection keeps its last usable water for the paired card", () => {
+  const view = createConfirmedMarkets({ enabled: true, escapeHtml });
+  const confirmed = { pinnacle: { odds: [
+    {
+      market: "3", option: "4", line: "3", quoted: false, hongKong: null,
+      lastHongKong: 0.854, lastQuotedAt: "2026-10-30T19:57:21.000+08:00",
+      capturedAt: "2026-10-30T20:31:00.000+08:00",
+    },
+    { market: "3", option: "3", line: "3", quoted: false, hongKong: null },
+  ] } };
+
+  const suspended = view.quote(confirmed, "3", "4", "3");
+  assert.equal(suspended.quoted, false);
+  assert.equal(suspended.price, "—");
+  assert.equal(suspended.suspended, true);
+  assert.equal(suspended.lastPrice, "0.854");
+  assert.equal(suspended.lastCapturedAt, "2026-10-30T19:57:21.000+08:00");
+
+  const neverQuoted = view.quote(confirmed, "3", "3", "3");
+  assert.equal(neverQuoted.quoted, false);
+  assert.equal(neverQuoted.suspended, undefined);
+  assert.equal(neverQuoted.lastPrice, undefined);
+});
+
 test("removed mappings clear cached confirmed data", async t => {
   const view = createConfirmedMarkets({ enabled: true, escapeHtml });
   let payload = { items: [{ crownId: "9", pinnacleId: "101" }] };
@@ -110,7 +134,19 @@ test("a missing same line reports the closest Pinnacle line in Crown notation", 
   assert.equal(handicap.price, "—");
   assert.deepEqual(handicap.alternate, {
     line: "-0.5/1", price: "1.050", quoted: true, capturedAt: "2026-10-30T08:00:00+08:00",
+    lastPrice: "", lastCapturedAt: "",
   });
+
+  const suspendedNearest = view.quote({ pinnacle: { odds: [
+    {
+      market: "2", option: "1", line: "0.5", quoted: false, hongKong: null,
+      lastHongKong: 0.91, lastQuotedAt: "2026-10-30T19:00:00+08:00",
+    },
+  ] } }, "2", "1", "1.25");
+  assert.equal(suspendedNearest.alternate.line, "+0.5");
+  assert.equal(suspendedNearest.alternate.price, "—");
+  assert.equal(suspendedNearest.alternate.lastPrice, "0.910");
+  assert.equal(suspendedNearest.alternate.lastCapturedAt, "2026-10-30T19:00:00+08:00");
 
   const total = view.quote(confirmed, "3", "3", "2.5");
   assert.equal(total.alternate.line, "2.5/3");

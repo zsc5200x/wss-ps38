@@ -1021,17 +1021,27 @@ def _normalize_event(game, mode, display_format="HK", raw_format="CROWN_HK", mor
             continue
         item.setdefault("gid", event_id)
         item.setdefault("market_id", event_id)
+    period = str(game.get("NOW_MODEL") or "") if live else ""
+    # Crown keeps finished matches flagged live with a frozen minute such as
+    # "2H^74:13". Expose the period as an explicit finish signal so the
+    # homepage can stop listing them as in-play.
+    normalized_period = period.strip().upper().replace(" ", "_").replace("-", "_")
+    is_finished = normalized_period in {
+        "FT", "FULL_TIME", "FULLTIME", "FINISHED", "FINAL", "ENDED", "END",
+        "COMPLETE", "COMPLETED",
+    }
     return {
         "id": str(game.get("GID") or game.get("ID") or ""),
         "league_id": str(game.get("LID") or ""),
         "league": str(game.get("LEAGUE") or "未命名联赛"),
         "is_live": live or str(game.get("IS_RB") or "").upper() == "Y",
+        "is_finished": is_finished,
         "home": str(game.get("TEAM_H") or ""),
         "away": str(game.get("TEAM_C") or ""),
         "start_label": str(game.get("DATETIME") or ""),
         "score": score,
         "minute": str(game.get("RETIMESET") or ""),
-        "period": str(game.get("NOW_MODEL") or "") if live else "",
+        "period": period,
         "markets": {"handicap": handicap, "total": total, "moneyline": moneyline},
         "extra_markets": _public_more_markets(more_markets),
         "odds_format": display_format,

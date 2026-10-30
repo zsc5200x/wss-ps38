@@ -2,6 +2,7 @@
 from __future__ import annotations
 import csv
 import json
+import sqlite3
 import threading
 from collections import Counter, deque
 from datetime import datetime, timedelta
@@ -636,6 +637,12 @@ class OddsStore:
             "decimal": decimal,
             "hongKong": hong_kong,
             "quoted": quoted,
+            # The latest *quoted* water is kept separately: Pinnacle suspends a
+            # selection by sending an empty price, and blanking the value makes
+            # a paired card look unquoted even though a recent water exists.
+            "lastDecimal": decimal if quoted else None,
+            "lastHongKong": hong_kong if quoted else None,
+            "lastQuotedAt": captured_at if quoted else "",
             "direction": direction,
             "previousDecimal": previous_decimal,
             "delta": delta,
@@ -711,6 +718,12 @@ class OddsStore:
         if direction in {"up", "down", "new"}:
             self.change_serial += 1
             serial = self.change_serial
+        # A suspension must not erase the last usable water: keep it for the
+        # paired card (marked as suspended) while ``quoted``/``hongKong`` stay
+        # strict so the arbitrage scanner never consumes a stale price.
+        last_decimal = decimal if quoted else old.get("lastDecimal")
+        last_hong_kong = hong_kong if quoted else old.get("lastHongKong")
+        last_quoted_at = captured_at if quoted else old.get("lastQuotedAt", "")
         old.update(
             {
                 "eventName": self.events[event_id]["name"],
@@ -730,6 +743,9 @@ class OddsStore:
                 "decimal": decimal,
                 "hongKong": hong_kong,
                 "quoted": quoted,
+                "lastDecimal": last_decimal,
+                "lastHongKong": last_hong_kong,
+                "lastQuotedAt": last_quoted_at,
                 "direction": direction,
                 "previousDecimal": previous_decimal,
                 "delta": delta,
@@ -944,6 +960,9 @@ class OddsStore:
             **row,
             "decimalLabel": "" if row["decimal"] is None else f'{row["decimal"]:.4f}',
             "hongKongLabel": "" if row["hongKong"] is None else f'{row["hongKong"]:.4f}',
+            "lastDecimalLabel": "" if row.get("lastDecimal") is None else f'{row["lastDecimal"]:.4f}',
+            "lastHongKongLabel": "" if row.get("lastHongKong") is None else f'{row["lastHongKong"]:.4f}',
+            "suspended": bool(row.get("quoted") is False and row.get("lastQuotedAt")),
             "history": hist[-HISTORY_LIMIT:],
         }
 
@@ -1238,12 +1257,36 @@ class OddsStore:
                 event = self.history_db.get_event(key)
             if event is None:
                 return None
+            current = [
+                row
+                for row in self.odds_by_event.get(key, {}).values()
+                if is_full_time_market(row.get("stage"), row.get("market"))
+            ]
+            # After a restart the in-memory row can be rebuilt from a bare
+            # suspension tick, losing the quote it had before. Recover the last
+            # persisted water so the paired card can keep showing it (badged as
+            # suspended) instead of a dash.
+            if any(row.get("lastHongKong") is None for row in current):
+                try:
+                    persisted = self.history_db.latest_points(key)
+                except (sqlite3.Error, OSError):
+                    persisted = {}
+                for row in current:
+                    if row.get("lastHongKong") is not None:
+                        continue
+                    point = persisted.get(
+                        (
+                            str(row.get("stage") or ""), str(row.get("market") or ""),
+                            str(row.get("option") or ""), str(row.get("line") or ""),
+                        )
+                    )
+                    if not point or point.get("hongKong") is None:
+                        continue
+                    row["lastHongKong"] = point["hongKong"]
+                    row["lastDecimal"] = point["decimal"]
+                    row["lastQuotedAt"] = point["capturedAt"]
             rows = sorted(
-                (
-                    self.serialize_row(key, row)
-                    for row in self.odds_by_event.get(key, {}).values()
-                    if is_full_time_market(row.get("stage"), row.get("market"))
-                ),
+                (self.serialize_row(key, row) for row in current),
                 key=lambda row: (
                     row.get("market", ""), row.get("stage", ""),
                     row.get("option", ""), row.get("line", ""),

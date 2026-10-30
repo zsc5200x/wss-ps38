@@ -203,6 +203,8 @@ h1,h2,h3,p{margin:0}
 .paired-odds .crown-odds{color:var(--text);font-family:var(--font-mono);font-size:.62rem;font-variant-numeric:tabular-nums;font-weight:600;white-space:nowrap}
 .paired-odds .pinnacle-odds{color:#b9d5ff;font-family:var(--font-mono);font-size:.62rem;font-variant-numeric:tabular-nums;font-weight:600;white-space:nowrap}
 .paired-odds .paired-line-note{color:var(--muted-2);font-family:var(--font-mono);font-size:.5rem;font-weight:500;white-space:nowrap}
+.paired-odds .pinnacle-odds.suspended{color:#f0b37e}
+.paired-odds .paired-line-note.suspended{color:#f0b37e}
 .paired-odds .paired-change{justify-self:end;display:inline-flex;align-items:center;gap:2px;padding:1px 5px;border-radius:5px;font-family:var(--font-mono);font-size:.5rem;font-variant-numeric:tabular-nums;font-weight:650;line-height:1.5;white-space:nowrap}
 .paired-change.up{color:#9df7ce;background:rgba(66,230,164,.13)}
 .paired-change.down{color:#ff9cad;background:rgba(255,100,124,.14)}

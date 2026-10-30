@@ -209,6 +209,44 @@ class CandidateRankingTests(unittest.TestCase):
         self.assertIn("组内有 1 场赛事候选吻合", ranked["c-league-1"][0]["reasons"])
 
 
+    def test_league_candidates_penalize_a_large_event_count_mismatch(self):
+        pinnacle = [
+            pinnacle_event(
+                event_id=f"p-alg-{index}", home=f"P主{index}", away=f"P客{index}",
+                league="阿尔及利亚 - 乙级联赛", league_id="p-alg-2",
+            )
+            for index in range(7)
+        ]
+        crown = [
+            crown_event(
+                event_id=f"c-alg-{index}", home=f"C主{index}", away=f"C客{index}",
+                league="阿尔及利亚甲组联赛", league_id="c-alg-1",
+            )
+            for index in range(3)
+        ]
+
+        ranked = rank_league_candidates(pinnacle, crown)
+        candidate = ranked["c-alg-1"][0]
+
+        self.assertLess(candidate["score"], 85)
+        self.assertIn("赛事数量差异较大（3 / 7 场）", candidate["reasons"])
+
+    def test_league_aliases_are_directional(self):
+        aliases = build_alias_index(league_pairs=[(
+            "阿尔及利亚 - 甲级联赛", "阿尔及利亚乙组联赛",
+        )])
+        # The confirmed 甲级 <-> 乙组 pair must not make 甲组 <-> 乙级 look like
+        # an alias; that crossed pair is exactly the wrong 3-vs-7 suggestion.
+        pinnacle = [pinnacle_event(
+            event_id="p-alg", league="阿尔及利亚 - 乙级联赛", league_id="p-alg-2",
+        )]
+        crown = [crown_event(
+            event_id="c-alg", league="阿尔及利亚甲组联赛", league_id="c-alg-1",
+        )]
+        ranked = rank_league_candidates(pinnacle, crown, aliases=aliases)
+        candidate = ranked["c-alg-1"][0]
+        self.assertNotIn("命中已确认的联赛别名", candidate["reasons"])
+
     def test_league_candidates_use_country_and_event_count(self):
         pinnacle = []
         crown = []

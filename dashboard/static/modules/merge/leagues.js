@@ -18,7 +18,6 @@ export function renderLeagueBinding(league, source, mapping, pairedLeague, sugge
   if (mapping && pairedLeague && !editing) {
     const summary = el("div", "merge-league-binding-summary");
     summary.append(el("span", "merge-status mapped", "联赛已绑定"));
-    summary.append(el("strong", "merge-league-pair-name", `${pairedLeague.name} · ${source === "crown" ? "平博" : "皇冠"}联赛 ID ${pairedLeague.id}`));
     if (source === "crown") {
       const actions = el("div", "merge-league-actions");
       const change = el("button", "merge-action-button", "更换联赛");
@@ -171,9 +170,16 @@ export function renderMergeLeagueGroup(league, source, context) {
   toggle.setAttribute("aria-expanded", String(open));
   toggle.setAttribute("aria-controls", `${sectionId}-events`);
   toggle.disabled = !mapping;
-  const title = el("span", "merge-league-name", league.name);
-  toggle.append(title);
-  toggle.append(el("span", "merge-league-id", `${isCrown ? "皇冠" : "平博"}联赛 ID ${leagueId}`));
+  const identity = el("span", "merge-league-identity");
+  identity.append(el("span", "merge-league-name", league.name));
+  identity.append(el("span", "merge-league-id", `${isCrown ? "皇冠" : "平博"}联赛 ID ${leagueId}`));
+  toggle.append(identity);
+  if (mapping && pairedLeague) {
+    const pair = el("span", "merge-league-identity merge-league-paired-identity");
+    pair.append(el("span", "merge-league-name", pairedLeague.name));
+    pair.append(el("span", "merge-league-id", `${isCrown ? "平博" : "皇冠"}联赛 ID ${pairedLeague.id}`));
+    toggle.append(pair);
+  }
   toggle.append(el("span", "merge-league-count", `${league.events.length} 场`));
   if (mapping) toggle.append(el("span", "merge-status mapped merge-league-status", "已绑定"));
   else toggle.append(el("span", "merge-status pending merge-league-status", "未绑定"));

@@ -80,3 +80,21 @@ test("paired movement badges mirror the Pinnacle data panel", () => {
   assert.equal(crownPinnacleChange({ quoted: true, direction: "flat", delta: 0 }), null);
   assert.equal(crownPinnacleChange({ quoted: false, direction: "up", delta: 0.1 }), null);
 });
+
+import { crownHandicapLine, crownNormalizeLine, crownQuarterLine } from "../../crown/static/modules/line-format.js";
+
+test("Crown handicap lines keep the receiving sign when paired with Pinnacle", () => {
+  // Crown writes a receiving home line as "+1.5"; the paired lookup must keep
+  // the plus, otherwise it searches for -1.5 and never finds the Pinnacle row.
+  assert.equal(crownHandicapLine("+1.5", "home"), "+1.5");
+  assert.equal(crownHandicapLine("+1.5", "away"), "-1.5");
+  assert.equal(crownHandicapLine("-1.5", "home"), "-1.5");
+  assert.equal(crownHandicapLine("-1.5", "away"), "+1.5");
+  assert.equal(crownHandicapLine("+0/0.5", "home"), "+0/0.5");
+  assert.equal(crownHandicapLine("+0/0.5", "away"), "-0/0.5");
+  assert.equal(crownHandicapLine("0", "home"), "0");
+  assert.equal(crownNormalizeLine(" 3 / 3.5 "), "3/3.5");
+  assert.equal(crownQuarterLine("+0.75"), "+0.5/1");
+  assert.equal(crownQuarterLine("-0.25"), "-0/0.5");
+  assert.equal(crownQuarterLine("0.25"), "0/0.5");
+});

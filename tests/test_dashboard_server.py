@@ -93,6 +93,61 @@ class DashboardStoreTests(unittest.TestCase):
         self.assertEqual(stored["sportId"], "1")
         self.assertEqual(stored["leagueId"], "10")
 
+    def _total_record(self, captured_at, price):
+        kickoff_ms = int(datetime.now().timestamp() * 1000) - 20 * 60 * 1000
+        payload = {
+            "type": "UPDATE_ODDS",
+            "odds": {
+                "live": True,
+                "l": [[1, "Soccer", [[10, "Test League", [[100, "Home", "Away", 0, kickoff_ms]]]]]],
+                "u": [
+                    [1, [[0, 3, 4, 3.0, None, price, 0, 0, 0, 0, "O", 0, 100]]],
+                ],
+            },
+        }
+        return json.dumps({
+            "captured_at": captured_at,
+            "opcode": 1,
+            "payload": json.dumps(payload),
+        })
+
+    def test_suspension_keeps_the_last_quoted_water_for_the_paired_card(self):
+        store = self.make_store()
+        store.process_line(self._total_record("2026-10-30T19:57:21.000+08:00", "1.854"))
+        store.process_line(self._total_record("2026-10-30T20:31:00.000+08:00", None))
+
+        details = store.event_details("100")
+        row = next(item for item in details["odds"] if item["market"] == "3")
+        # The live tick is strict: no current quote.
+        self.assertFalse(row["quoted"])
+        self.assertIsNone(row["hongKong"])
+        # The last usable water stays available for the paired card.
+        self.assertEqual(row["lastHongKong"], 1.854)
+        self.assertEqual(row["lastQuotedAt"], "2026-10-30T19:57:21.000+08:00")
+        self.assertTrue(row["suspended"])
+
+    def test_restart_recovers_the_last_water_from_the_history_database(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        config = {
+            "capture_path": str(root / "capture.jsonl"),
+            "live_snapshot_file": str(root / "latest.csv"),
+            "dashboard_db_path": str(root / "history.sqlite3"),
+        }
+        store = OddsStore(config)
+        store.process_line(self._total_record("2026-10-30T19:57:21.000+08:00", "1.854"))
+        store.flush_history()
+        store.close()
+
+        restarted = OddsStore(config)
+        self.addCleanup(restarted.close)
+        restarted.process_line(self._total_record("2026-10-30T20:31:00.000+08:00", None))
+        details = restarted.event_details("100")
+        row = next(item for item in details["odds"] if item["market"] == "3")
+        self.assertEqual(row["lastHongKong"], 1.854)
+        self.assertTrue(row["suspended"])
+
     def test_filters_to_full_time_supported_markets(self):
         store = self.make_store()
         kickoff_ms = int(datetime.now().timestamp() * 1000) - 20 * 60 * 1000
