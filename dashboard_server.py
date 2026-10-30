@@ -959,6 +959,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 mapping.get("pinnacleId"), mapping.get("pinnacleSnapshot")
             )
             if details:
+                # The live store keeps the provider kickoff string, while a
+                # confirmed mapping stores the already-normalized instant.
+                # Carry that snapshot metadata into the scanner so a UTC host
+                # cannot reinterpret a local provider time and discard a valid
+                # same-fixture pair.
+                snapshot = mapping.get("pinnacleSnapshot")
+                if isinstance(snapshot, dict):
+                    event = details.get("event")
+                    if isinstance(event, dict):
+                        details["event"] = {
+                            **event,
+                            **{key: snapshot[key] for key in (
+                                "normalizedKickoff", "normalizedTimezone",
+                                "sourceTimezone",
+                            ) if snapshot.get(key)},
+                        }
                 rows_by_crown[crown_id] = details
         result = find_opportunities(
             crown_events,

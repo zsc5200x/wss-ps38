@@ -897,6 +897,17 @@ class AuthService:
             job.member_ui_verified = False
             job.resume_url = ""
 
+        # A visible page that is already on the previously persisted member
+        # origin is itself the browser's proof of the current destination.  Do
+        # not make manual-session synchronisation depend on a fresh DNS lookup
+        # for that same origin (offline environments and test browsers can
+        # legitimately have no resolver access).  Redirects to a new origin
+        # still go through the normal validation path above.
+        if (not job.member_origin and isinstance(stored, dict)
+                and stored.get("member_origin")
+                and _origin(page.url) == _origin(str(stored["member_origin"]))):
+            job.member_origin = _canonical_origin(page.url)
+
         if adopted_origin and not self._trusted_page(job, page.url):
             # The verified Crown page is the source of truth. Its current
             # origin replaces any stale saved handoff.

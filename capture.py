@@ -5,8 +5,11 @@ not log in, send WebSocket messages, or interact with the page.
 """
 
 import asyncio
+import atexit
 import json
 import os
+import queue
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +18,8 @@ from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
 from playwright.async_api import async_playwright
+from project_config import config_path as shared_config_path
+from project_config import get_path, load_config, target_hosts as shared_target_hosts
 
 
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -29,75 +34,40 @@ def _env_list(name):
 
 
 def _load_settings():
-    """Load optional JSON settings while preserving the old defaults."""
-    config = {}
-    if CONFIG_PATH.exists():
+    """Load collector settings through the shared project configuration."""
+    # CONFIG_PATH remains a patchable compatibility hook for migration tests.
+    selected = shared_config_path()
+    if CONFIG_PATH != selected:
+        previous = os.environ.get("PS3838_CONFIG")
+        os.environ["PS3838_CONFIG"] = str(CONFIG_PATH)
         try:
-            with CONFIG_PATH.open(encoding="utf-8") as f:
-                loaded = json.load(f)
-            if isinstance(loaded, dict):
-                config = loaded
+            config = load_config()
+        finally:
+            if previous is None:
+                os.environ.pop("PS3838_CONFIG", None)
             else:
-                print(
-                    f"[配置警告] {CONFIG_PATH} 顶层必须是 JSON 对象，已使用默认值",
-                    flush=True,
-                )
-        except (OSError, json.JSONDecodeError) as exc:
-            print(
-                f"[配置警告] 无法读取 {CONFIG_PATH}: {exc}，已使用默认值",
-                flush=True,
-            )
+                os.environ["PS3838_CONFIG"] = previous
+    else:
+        config = load_config()
 
-    cdp_url = (
-        os.environ.get("CAPTURE_CDP_URL")
-        or config.get("cdp_url")
-        or "http://127.0.0.1:9222"
-    )
-
-    output_value = (
-        os.environ.get("CAPTURE_OUTPUT")
-        or config.get("capture_path")
-        or config.get("output")
-        or str(PROJECT_DIR / "capture.jsonl")
-    )
-    output_path = Path(output_value).expanduser()
-    if not output_path.is_absolute():
-        output_path = PROJECT_DIR / output_path
+    cdp_url = config["cdp_url"]
+    output_path = get_path(config, "capture_path")
     # Migration leaves a compatibility symlink; rotate the actual data file.
     output_path = output_path.resolve()
 
-    configured_hosts = config.get("target_hosts")
-    if isinstance(configured_hosts, str):
-        configured_hosts = [x.strip() for x in configured_hosts.split(",")]
-    if not isinstance(configured_hosts, list):
-        configured_hosts = ["ps3838.com", "ps38ag.com"]
-
-    env_hosts = _env_list("CAPTURE_TARGET_HOSTS")
-    target_hosts = [
-        str(host).strip().lower().lstrip(".")
-        for host in (env_hosts or configured_hosts)
-        if str(host).strip()
-    ]
-    if not target_hosts:
-        target_hosts = ["ps3838.com", "ps38ag.com"]
+    target_hosts = shared_target_hosts(config)
 
     try:
         rotation_mb = max(0, float(config.get("capture_rotation_mb", 0)))
     except (TypeError, ValueError):
         rotation_mb = 0
 
-    dashboard_url = (
-        os.environ.get("CAPTURE_DASHBOARD_URL")
-        or config.get("dashboard_url")
-        or "http://127.0.0.1:8787"
-    )
+    dashboard_url = config.get("dashboard_url") or "http://127.0.0.1:8787"
     try:
         presence_interval = max(
             5.0,
             float(
-                os.environ.get("CAPTURE_PRESENCE_INTERVAL_SECONDS")
-                or config.get("presence_interval_seconds")
-                or 5
+                config.get("presence_interval_seconds") or 5
             ),
         )
     except (TypeError, ValueError):
@@ -129,8 +99,93 @@ sessions = {}
 socket_urls = {}
 count = 0
 write_errors = 0
+dropped_frames = 0
 last_no_page_notice = None
 last_odds_at = 0.0
+
+# CDP callbacks run on the Playwright event loop.  Writing and flushing a
+# complete JSON line from that callback can stall frame delivery when the
+# browser sends a burst of odds updates.  Keep the callback non-blocking and
+# let one writer preserve ordering on disk.  The queue is deliberately
+# bounded: if the disk cannot keep up, dropping is visible in diagnostics
+# instead of allowing unbounded memory growth.
+_write_queue = queue.Queue(maxsize=4096)
+_writer_thread = None
+_writer_stop = object()
+_writer_lock = threading.Lock()
+
+
+def _capture_writer_loop():
+    global write_errors
+    pending = []
+    while True:
+        try:
+            item = _write_queue.get(timeout=0.25)
+        except queue.Empty:
+            item = None
+        if item is _writer_stop:
+            if pending:
+                _write_batch(pending)
+                for _ in pending:
+                    _write_queue.task_done()
+            _write_queue.task_done()
+            return
+        if item is not None:
+            pending.append(item)
+        # Batching reduces open/flush calls while retaining low latency.
+        if pending and (len(pending) >= 64 or item is None):
+            _write_batch(pending)
+            for _ in pending:
+                _write_queue.task_done()
+            pending.clear()
+
+
+def _write_batch(records):
+    global write_errors
+    try:
+        OUT.parent.mkdir(parents=True, exist_ok=True)
+        rotate_output_if_needed()
+        with OUT.open("a", encoding="utf-8") as output_file:
+            output_file.write("".join(records))
+            output_file.flush()
+    except OSError as exc:
+        write_errors += 1
+        print(f"[写入失败 #{write_errors}] {OUT}: {exc}", flush=True)
+
+
+def _ensure_capture_writer():
+    global _writer_thread
+    with _writer_lock:
+        if _writer_thread is None or not _writer_thread.is_alive():
+            _writer_thread = threading.Thread(
+                target=_capture_writer_loop,
+                name="capture-jsonl-writer",
+                daemon=True,
+            )
+            _writer_thread.start()
+
+
+def flush_capture_writer(timeout=5.0):
+    """Drain queued frames; useful for clean shutdown and deterministic tests."""
+    thread = _writer_thread
+    if thread is None:
+        return
+    _write_queue.join()
+
+
+def stop_capture_writer(timeout=5.0):
+    """Stop the background writer after draining frames already accepted."""
+    global _writer_thread
+    thread = _writer_thread
+    if thread is None:
+        return
+    _write_queue.put(_writer_stop)
+    thread.join(timeout=timeout)
+    if not thread.is_alive():
+        _writer_thread = None
+
+
+atexit.register(stop_capture_writer)
 
 
 def stamp():
@@ -179,7 +234,7 @@ def rotate_output_if_needed():
 
 
 def on_received(event):
-    global count, write_errors, last_odds_at
+    global count, write_errors, dropped_frames, last_odds_at
     count += 1
 
     frame = event.get("response") or {}
@@ -196,15 +251,15 @@ def on_received(event):
         "payload": payload,
     }
 
+    serialized = json.dumps(record, ensure_ascii=False) + "\n"
+    _ensure_capture_writer()
     try:
-        OUT.parent.mkdir(parents=True, exist_ok=True)
-        rotate_output_if_needed()
-        with OUT.open("a", encoding="utf-8") as output_file:
-            output_file.write(json.dumps(record, ensure_ascii=False) + "\n")
-            output_file.flush()
-    except OSError as exc:
-        write_errors += 1
-        print(f"[写入失败 #{write_errors}] {OUT}: {exc}", flush=True)
+        _write_queue.put_nowait(serialized)
+    except queue.Full:
+        # Never block CDP delivery on a slow disk.  The counter is emitted in
+        # the diagnostic line below so operators can distinguish a quiet feed
+        # from a saturated collector.
+        dropped_frames += 1
 
     data = None
     if opcode == 1:
@@ -221,7 +276,8 @@ def on_received(event):
         f"chars={len(payload)} "
         f"type={data.get('type') if data else '?'} "
         f"ssn={data.get('ssn') if data else '?'} "
-        f"url={'已捕获' if socket_url else '未捕获'}",
+        f"url={'已捕获' if socket_url else '未捕获'} "
+        f"queue_drop={dropped_frames}",
         flush=True,
     )
 
@@ -659,8 +715,11 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
+        stop_capture_writer()
         print(f"\n已停止，文件保存在: {OUT}", flush=True)
     except SystemExit:
+        stop_capture_writer()
         raise
     except Exception as exc:
+        stop_capture_writer()
         print("运行失败:", repr(exc), flush=True)

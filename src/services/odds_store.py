@@ -4,6 +4,7 @@ import csv
 import json
 import sqlite3
 import threading
+from zoneinfo import ZoneInfo
 from collections import Counter, deque
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional
@@ -95,7 +96,21 @@ class OddsStore:
                 target = datetime.fromtimestamp(
                     kickoff_ms / 1000, tz=kickoff.tzinfo
                 )
-                if abs((kickoff - target).total_seconds()) <= 600:
+                kickoff_values = [kickoff]
+                # The compact browser snapshot uses PS3838 local time while
+                # cloud hosts commonly run in UTC.  Try the provider timezone
+                # for naive stored strings as well, without changing the
+                # dashboard-wide parsing contract.
+                raw_kickoff = as_text(event.get("kickoff"))
+                if "T" not in raw_kickoff and "+" not in raw_kickoff and "Z" not in raw_kickoff:
+                    try:
+                        local_value = datetime.fromisoformat(raw_kickoff).replace(
+                            tzinfo=ZoneInfo("Asia/Shanghai")
+                        ).astimezone(kickoff.tzinfo)
+                        kickoff_values.append(local_value)
+                    except ValueError:
+                        pass
+                if any(abs((value - target).total_seconds()) <= 600 for value in kickoff_values):
                     timed_candidates.append(event_id)
             if timed_candidates:
                 live_candidates = [
