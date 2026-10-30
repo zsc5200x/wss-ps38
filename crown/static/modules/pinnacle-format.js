@@ -8,7 +8,14 @@ export function crownFormatPinnacleHandicap(value){
   const number=Number(value);
   if(!Number.isFinite(number))return crownFormatPinnacleLine(value);
   if(Math.abs(number)<0.000001)return "0";
-  return `${number>0?"+":""}${crownFormatPinnacleLine(number)}`;
+  const magnitude=Math.abs(number);
+  const steps=Math.round(magnitude*4);
+  const sign=number>0?"+":"-";
+  // Crown's split quarter notation: 0.25 -> 0/0.5, 0.75 -> 0.5/1.
+  if(Math.abs(magnitude*4-steps)<0.000001&&steps%2===1){
+    return `${sign}${crownFormatPinnacleLine(magnitude-0.25)}/${crownFormatPinnacleLine(magnitude+0.25)}`;
+  }
+  return `${sign}${crownFormatPinnacleLine(magnitude)}`;
 }
 export function crownFormatPinnacleTotal(value){
   const number=Number(value);
@@ -30,7 +37,11 @@ export function crownPinnacleQuote(row,event){
   const [home,away]=crownPinnacleTeams(event);
   const market=String(row?.market||"");
   const option=String(row?.option||"");
-  if(market==="1")return {label:{"0":`${home} 主胜`,"1":"和局","2":`${away} 客胜`}[option]||`选项 ${option}`,line:"全场"};
+  if(market==="1"){
+    // Pinnacle numbers 1X2 as 0=home, 1=away, 2=draw.
+    const labels={"0":`${home} 主胜`,"1":`${away} 客胜`,"2":"和局"};
+    return {label:labels[option]||`选项 ${option}`,line:"全场"};
+  }
   if(market==="2"){
     const raw=Number(row?.line);
     const side=option==="0"?raw:-raw;
@@ -45,6 +56,25 @@ export function crownPinnacleQuote(row,event){
 }
 export function crownPinnaclePrice(row){
   if(!row||row.quoted===false)return "—";
-  const hk=row.hongKongLabel??(row.hongKong==null?"":Number(row.hongKong).toFixed(3));
-  return String(hk||"—");
+  const raw=row.hongKongLabel!=null&&row.hongKongLabel!==""?row.hongKongLabel:row.hongKong;
+  if(raw==null||raw==="")return "—";
+  const number=Number(raw);
+  return Number.isFinite(number)?number.toFixed(3):"—";
+}
+/**
+ * Movement badge for a paired quote, matching the Pinnacle data panel:
+ * up is green, down is red, a newly created row is "新盘", flat is omitted.
+ * HK and decimal water differ by 1, so the stored decimal delta is the same
+ * number in both formats and needs no conversion.
+ */
+export function crownPinnacleChange(quote){
+  if(!quote||!quote.quoted)return null;
+  const direction=String(quote.direction||"flat");
+  if(direction==="new")return {direction:"new",text:"新盘",delta:null};
+  if(direction!=="up"&&direction!=="down")return null;
+  const delta=Number(quote.delta);
+  if(!Number.isFinite(delta))return null;
+  const arrow=direction==="up"?"▲":"▼";
+  const value=`${delta>0?"+":""}${delta.toFixed(3)}`;
+  return {direction,text:`${arrow} ${value}`,delta};
 }

@@ -12,14 +12,16 @@ import http.client
 import json
 import mimetypes
 import os
+import re
 import signal
 import shutil
 import sqlite3
 import subprocess
 import sys
 import threading
+import time
 import webbrowser
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -28,6 +30,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from crown_proxy import is_crown_path, proxy_crown
 from fixture_merge import (
     FixtureMergeStore,
+    build_alias_index,
     MappingConflict,
     prepare_crown_event,
     prepare_pinnacle_event,
@@ -35,8 +38,11 @@ from fixture_merge import (
     rank_league_candidates,
     summarize_leagues,
 )
+from src.services.fixture_matching import AUTO_MAP_TIME_MINUTES, competition_conflict
 from maintenance import backup_database, verify_database
-from project_config import DEFAULTS, config_path, get_path, load_config
+import partner_orders
+from project_config import DEFAULTS, config_path, get_path, load_config, service_url
+from telegram_push import TelegramPusher, list_chats
 
 
 # Compatibility exports: callers may keep importing the historical root module.
@@ -46,6 +52,7 @@ from src.core.constants import (
 from src.core.time import now_iso
 from src.providers.pinnacle.parser import (as_text, float_or_none, iter_event_records, iter_events, iter_leaf_rows, iter_messages, metadata_status)
 from src.services.event_visibility import (event_has_display_metadata, event_is_finished, event_is_visible_today_upcoming, event_scope, is_full_time_market, live_event_is_stale, match_elapsed_minute, parse_kickoff)
+from src.services.arbitrage import find_opportunities
 from src.services.odds_store import OddsStore
 from src.storage.history import HistoryDatabase, HistoryWriter
 from src.services.source_freshness import crown_freshness, pinnacle_freshness
@@ -57,6 +64,44 @@ MAX_JSON_BODY_BYTES = 4 * 1024 * 1024
 HISTORY_QUERY_LIMIT = 5000
 HISTORY_QUERY_LIMIT_MAX = 10000
 HISTORY_QUERY_HOURS_MAX = 24 * 365
+
+BEIJING = timezone(timedelta(hours=8))
+
+
+def _parse_day(value: str, *, end: bool = False, tz_minutes: int = 480):
+    """Parse a YYYY-MM-DD day boundary in the given UTC offset into epoch ms."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    zone = timezone(timedelta(minutes=tz_minutes))
+    day = datetime.strptime(text, "%Y-%m-%d").replace(tzinfo=zone)
+    if end:
+        return int((day + timedelta(days=1)).timestamp() * 1000) - 1
+    return int(day.timestamp() * 1000)
+
+
+def _day_utc_bounds(from_value: str, to_value: str, *, tz_minutes: int = 480):
+    """Return the UTC [start, end] strings for a local day range."""
+    zone = timezone(timedelta(minutes=tz_minutes))
+
+    def bound(value: str, end: bool):
+        text = str(value or "").strip()
+        if not text:
+            return None
+        day = datetime.strptime(text, "%Y-%m-%d").replace(tzinfo=zone)
+        if end:
+            day = day + timedelta(days=1) - timedelta(seconds=1)
+        return day.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+    return bound(from_value, False), bound(to_value, True)
+AUTO_LEAGUE_SCORE_THRESHOLD = 85.0
+AUTO_FIXTURE_SCORE_THRESHOLD = 85.0
+# A fixture may auto-confirm below the legacy 85 score when the parent league is
+# already mapped, the kickoff matches and the team names are at least loosely
+# similar. This is what lets translated team names (山度士/桑托斯) through while
+# a different match at the same league still fails the time gate.
+AUTO_FIXTURE_TIME_MINUTES = AUTO_MAP_TIME_MINUTES
+AUTO_FIXTURE_TEAM_FLOOR = 0.15
 METADATA_STATUS_PATH = PROJECT_DIR / ".run" / "metadata_sync.status.json"
 METADATA_LOG_PATH = PROJECT_DIR / "logs" / "metadata_sync.log"
 
@@ -125,8 +170,18 @@ SETTINGS_SCHEMA: Dict[str, Dict[str, Any]] = {
         "restartRequired": False,
         "service": "维护任务",
     },
+    "crown_extra_markets_enabled": {
+        "label": "皇冠附加盘采集",
+        "type": "boolean",
+        "default": True,
+        "restartRequired": False,
+        "service": "皇冠服务",
+    },
 }
 SETTINGS_EDITABLE_FIELDS = frozenset(SETTINGS_SCHEMA)
+TELEGRAM_EDITABLE_FIELDS = frozenset(
+    {"telegram_enabled", "telegram_bot_token", "telegram_chat_id", "telegram_proxy"}
+)
 SETTINGS_RESTART_FIELDS = frozenset(
     key for key, item in SETTINGS_SCHEMA.items() if item.get("restartRequired")
 )
@@ -137,6 +192,10 @@ def _coerce_setting_value(key: str, value: Any) -> Any:
     schema = SETTINGS_SCHEMA.get(key)
     if schema is None:
         raise ValueError(f"不允许修改配置项：{key}")
+    if schema.get("type") == "boolean":
+        if not isinstance(value, bool):
+            raise ValueError(f"配置项 {key} 必须是布尔值")
+        return value
     if isinstance(value, bool):
         raise ValueError(f"配置项 {key} 必须是数字")
     try:
@@ -164,6 +223,32 @@ def _coerce_setting_value(key: str, value: Any) -> Any:
             raise ValueError(f"配置项 {key} 必须是整数")
         return int(number)
     return int(number) if number.is_integer() else number
+
+
+def _coerce_telegram_value(key: str, value: Any, config: Dict[str, Any]) -> Any:
+    """Validate the write-only Telegram settings."""
+    if key == "telegram_enabled":
+        if not isinstance(value, bool):
+            raise ValueError("推送开关必须是布尔值")
+        return value
+    if key == "telegram_bot_token":
+        text = str(value or "").strip()
+        if not text:
+            return str(config.get("telegram_bot_token") or "")
+        if not re.fullmatch(r"\d+:[A-Za-z0-9_-]{20,}", text):
+            raise ValueError("机器人 Token 格式不正确")
+        return text
+    if key == "telegram_chat_id":
+        text = str(value or "").strip()
+        if text and not re.fullmatch(r"-?\d+|@[A-Za-z0-9_]{5,}", text):
+            raise ValueError("请填写群 Chat ID 或公开群 @用户名")
+        return text
+    if key == "telegram_proxy":
+        text = str(value or "").strip()
+        if text and not re.fullmatch(r"https?://[^\s]+", text):
+            raise ValueError("代理地址必须以 http:// 或 https:// 开头")
+        return text
+    raise ValueError(f"不允许修改配置项：{key}")
 
 
 def _write_settings_file(updates: Dict[str, Any]) -> Dict[str, Any]:
@@ -196,6 +281,8 @@ def _write_settings_file(updates: Dict[str, Any]) -> Dict[str, Any]:
             json.dumps(current, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
+        if current.get("telegram_bot_token"):
+            os.chmod(backup_path, 0o600)
 
     merged = dict(current)
     merged.update(changed)
@@ -208,6 +295,9 @@ def _write_settings_file(updates: Dict[str, Any]) -> Dict[str, Any]:
             encoding="utf-8",
         )
         os.replace(temporary, active_path)
+        if merged.get("telegram_bot_token"):
+            # The bot token is a credential; keep the config file owner-only.
+            os.chmod(active_path, 0o600)
     finally:
         temporary.unlink(missing_ok=True)
     return {
@@ -264,6 +354,7 @@ def _settings_payload(
     effective = {key: config.get(key, DEFAULTS.get(key)) for key in SETTINGS_SCHEMA}
     readonly = {
         "cdp_url": config.get("cdp_url"),
+        "crown_service_url": service_url(config, "crown"),
         "chrome_binary": config.get("chrome_binary"),
         "chrome_profile_dir": config.get("chrome_profile_dir"),
         "start_url": config.get("start_url"),
@@ -273,11 +364,21 @@ def _settings_payload(
         "live_snapshot_file": str(get_path(config, "live_snapshot_file")),
         "dashboard_db_path": str(database_path),
         "backup_dir": str(backup_dir),
+        "partner_backend_url": config.get("partner_backend_url") or DEFAULTS.get("partner_backend_url"),
+        "partner_orders_db_path": str(get_path(config, "partner_orders_db_path")),
+        "partner_agents": config.get("partner_agents"),
+    }
+    telegram = {
+        "enabled": bool(config.get("telegram_enabled", False)),
+        "has_token": bool(str(config.get("telegram_bot_token") or "").strip()),
+        "chat_id": str(config.get("telegram_chat_id") or ""),
+        "proxy": str(config.get("telegram_proxy") or ""),
     }
     return {
         "ok": True,
         "configPath": str(config_path()),
         "effective": effective,
+        "telegram": telegram,
         "defaults": {
             key: schema.get("default", DEFAULTS.get(key))
             for key, schema in SETTINGS_SCHEMA.items()
@@ -513,6 +614,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.merge_store = server.merge_store
             self.config = server.dashboard_config
             self.config_lock = server.config_lock
+            self.partner_orders_path = getattr(server, "partner_orders_path", None)
+            self.telegram_runner = getattr(server, "telegram_runner", None)
         super().__init__(request, client_address, server)
 
     def _settings_response(self) -> Dict[str, Any]:
@@ -525,7 +628,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self.send_json({"ok": False, "error": str(exc)}, status=400)
             return
-        unknown = sorted(set(payload) - SETTINGS_EDITABLE_FIELDS)
+        unknown = sorted(set(payload) - SETTINGS_EDITABLE_FIELDS - TELEGRAM_EDITABLE_FIELDS)
         if unknown:
             self.send_json(
                 {"ok": False, "error": f"不允许修改配置项：{'、'.join(unknown)}"},
@@ -536,10 +639,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_json({"ok": False, "error": "请求中没有可保存的配置项"}, status=400)
             return
         try:
-            updates = {
-                key: _coerce_setting_value(key, value)
-                for key, value in payload.items()
-            }
+            updates = {}
+            for key, value in payload.items():
+                if key in TELEGRAM_EDITABLE_FIELDS:
+                    updates[key] = _coerce_telegram_value(key, value, self.config)
+                else:
+                    updates[key] = _coerce_setting_value(key, value)
         except ValueError as exc:
             self.send_json({"ok": False, "error": str(exc)}, status=400)
             return
@@ -550,10 +655,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": f"配置保存失败：{exc}"}, status=500)
                 return
             self.config.update(updates)
+            if updates.get("telegram_enabled") is True:
+                runner = getattr(self, "telegram_runner", None)
+                if runner is not None:
+                    runner.arm()
             response = self._settings_response()
+        visible_changes = {
+            key: value for key, value in result["changed"].items()
+            if key != "telegram_bot_token"
+        }
         response.update(
             {
-                "changed": result["changed"],
+                "changed": visible_changes,
                 "backupPath": result["backupPath"],
                 "restartRequired": sorted(
                     set(result["changed"]) & SETTINGS_RESTART_FIELDS
@@ -580,7 +693,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         with self.config_lock:
             path = get_path(self.config, "dashboard_db_path")
         try:
-            result = verify_database(path)
+            result = verify_database(path, immutable=False, quick=True)
         except (OSError, RuntimeError, sqlite3.Error) as exc:
             self.send_json(
                 {"ok": False, "databasePath": str(path), "error": f"数据库检查失败：{exc}"},
@@ -595,7 +708,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         config = getattr(self, "config", {})
         connection = http.client.HTTPConnection(
             str(config.get("crown_host") or "127.0.0.1"),
-            int(config.get("crown_port") or 8887), timeout=4,
+            int(config.get("crown_port") or 9223), timeout=4,
         )
         error = "皇冠服务暂不可用；请确认皇冠数据已连接后重试。"
         self._crown_source = crown_freshness(error=error)
@@ -628,7 +741,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def _merge_event_lists(self) -> tuple[list[Dict[str, Any]], list[Dict[str, Any]], Optional[str]]:
         snapshot = self.store.snapshot()
-        source_pinnacle = snapshot.get("events") or []
+        # Crown lists fixtures several days ahead; use the wider mapping pool so
+        # an early-morning Pinnacle fixture is not replaced by a namesake
+        # competition that happens to be inside the daily dashboard window.
+        source_pinnacle = self.store.merge_events()
         source_crown, crown_error = self._crown_fixture_events()
         self._merge_source_status = self._merge_sources(snapshot, crown_error)
         pinnacle_events = [
@@ -642,6 +758,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if isinstance(event, dict)
         ]
         return pinnacle_events, crown_events, crown_error
+
+    def _merge_aliases(self) -> Dict[str, Any]:
+        """Exact name aliases learned from already-confirmed mappings."""
+        league_pairs = [
+            ((item.get("pinnacleSnapshot") or {}).get("name"),
+             (item.get("crownSnapshot") or {}).get("name"))
+            for item in self.merge_store.list_league_mappings()
+        ]
+        team_pairs = []
+        for item in self.merge_store.list_mappings():
+            pinnacle = item.get("pinnacleSnapshot") or {}
+            crown = item.get("crownSnapshot") or {}
+            team_pairs.append((pinnacle.get("home"), crown.get("home")))
+            team_pairs.append((pinnacle.get("away"), crown.get("away")))
+        return build_alias_index(league_pairs, team_pairs)
 
     def _merge_payload(self) -> Dict[str, Any]:
         pinnacle_events, crown_events, crown_error = self._merge_event_lists()
@@ -659,8 +790,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         mapped_crown_leagues = set(league_mapping_by_crown)
         pinnacle_leagues = summarize_leagues(pinnacle_events)
         crown_leagues = summarize_leagues(crown_events)
+        aliases = self._merge_aliases()
         league_suggestion_map = rank_league_candidates(
-            pinnacle_events, crown_events, limit=5
+            pinnacle_events, crown_events, limit=5, aliases=aliases
         )
         league_suggestions = [
             candidate
@@ -671,7 +803,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         ]
         pinnacle_by_id = {str(event.get("id") or ""): event for event in pinnacle_events}
         crown_by_id = {str(event.get("id") or ""): event for event in crown_events}
-        suggestion_map = rank_candidates(pinnacle_events, crown_events, limit=5)
+        suggestion_map = rank_candidates(
+            pinnacle_events,
+            crown_events,
+            limit=5,
+            aliases=aliases,
+            league_mapping=league_mapping_by_crown,
+        )
         suggestions = []
         for pinnacle_id, candidates in suggestion_map.items():
             if pinnacle_id in mapped_pinnacle:
@@ -759,10 +897,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "extra_markets": {},
                 }
 
-            pinnacle_details = self.store.event_details(pinnacle_id)
             pinnacle_snapshot = mapping.get("pinnacleSnapshot")
             if not isinstance(pinnacle_snapshot, dict):
                 pinnacle_snapshot = {}
+            pinnacle_details = self.store.event_details(pinnacle_id, pinnacle_snapshot)
             if pinnacle_details is None:
                 pinnacle_event = {
                     **pinnacle_snapshot,
@@ -793,6 +931,93 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "items": items,
             "count": len(items),
             "crownError": crown_error,
+        }
+
+    def _scan_opportunities(self) -> Dict[str, Any]:
+        """Scan every confirmed fixture for same-line cross-book pairs."""
+        crown_events, crown_error = self._crown_fixture_events()
+        sources = {
+            "pinnacle": pinnacle_freshness(self.store.freshness_snapshot()),
+            "crown": getattr(self, "_crown_source", crown_freshness(error=crown_error)),
+        }
+        crown_by_id = {
+            str(item.get("id") or ""): item
+            for item in crown_events
+            if isinstance(item, dict) and str(item.get("id") or "")
+        }
+        mappings = self.merge_store.list_mappings()
+        rows_by_crown: Dict[str, Dict[str, Any]] = {}
+        for mapping in mappings:
+            crown_id = str(mapping.get("crownId") or "")
+            crown = crown_by_id.get(crown_id)
+            if not isinstance(crown, dict):
+                continue
+            markets = crown.get("markets") if isinstance(crown.get("markets"), dict) else {}
+            if not (markets.get("handicap") or markets.get("total")):
+                continue
+            details = self.store.event_rows(
+                mapping.get("pinnacleId"), mapping.get("pinnacleSnapshot")
+            )
+            if details:
+                rows_by_crown[crown_id] = details
+        result = find_opportunities(
+            crown_events,
+            rows_by_crown,
+            mappings,
+            crown_updated_at=sources["crown"].get("dataUpdatedAt")
+            if isinstance(sources.get("crown"), dict) else None,
+            min_edge=-0.05,
+            limit=50,
+        )
+        return {
+            "items": result["items"],
+            "stats": result["stats"],
+            "sources": sources,
+            "crownError": crown_error,
+        }
+
+    def _merge_opportunities_payload(self, query: Dict[str, list[str]]) -> Dict[str, Any]:
+        """Return the closest same-line arbitrage candidates across mappings.
+
+        The scan is cached for two seconds because it reads every confirmed
+        fixture; query parameters only filter the cached ranking.
+        """
+        try:
+            limit = max(1, min(50, int((query.get("limit") or ["15"])[0])))
+        except ValueError:
+            limit = 15
+        try:
+            min_edge = float((query.get("minEdge") or ["-5"])[0]) / 100.0
+        except ValueError:
+            min_edge = -0.05
+        live_only = str((query.get("liveOnly") or ["0"])[0]).lower() in {
+            "1", "true", "yes", "on"
+        }
+
+        server = self.server
+        with _OPPORTUNITY_CACHE_LOCK:
+            cached = getattr(server, "opportunity_cache", None)
+            now_mono = time.monotonic()
+            if cached and now_mono - cached["at"] < 2.0:
+                base = cached["value"]
+            else:
+                base = self._scan_opportunities()
+                server.opportunity_cache = {"at": now_mono, "value": base}
+        items = base["items"]
+        if live_only:
+            items = [item for item in items if item.get("isLive")]
+        items = [
+            item for item in items
+            if float(item.get("edge") or 0.0) >= min_edge
+        ][:limit]
+        return {
+            "ok": True,
+            "generatedAt": now_iso(),
+            "sources": base["sources"],
+            "stats": base["stats"],
+            "items": items,
+            "count": len(items),
+            "crownError": base.get("crownError"),
         }
 
     def _handle_merge_league_mapping(self) -> None:
@@ -846,6 +1071,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 status=409,
             )
             return
+        if competition_conflict(pinnacle_league.get("name"), crown_league.get("name")):
+            self.send_json(
+                {
+                    "ok": False,
+                    "error": (
+                        "两个联赛的赛事类别不一致（青年/预备队/女子），"
+                        "不能关联；请选择同一类别的联赛。"
+                    ),
+                },
+                status=409,
+            )
+            return
         try:
             self.merge_store.map_leagues(pinnacle_league, crown_league)
         except MappingConflict as exc:
@@ -854,6 +1091,213 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_json({
             "ok": True,
             "leagueMappings": self.merge_store.list_league_mappings(),
+        })
+
+    def _handle_merge_league_auto_mapping(self) -> None:
+        """Confirm unambiguous high-scoring leagues and fixtures.
+
+        This endpoint is intentionally POST-only so loading the merge page does
+        not mutate mappings until the page explicitly asks for auto-confirm.
+        Fixture candidates are considered only after their parent leagues are
+        mapped, and both sides must have a unique high-scoring candidate.
+        """
+        pinnacle_events, crown_events, crown_error = self._merge_event_lists()
+        if crown_error:
+            self.send_json({"ok": False, "error": crown_error}, status=503)
+            return
+
+        league_mappings = self.merge_store.list_league_mappings()
+        mapped_crown = {str(item.get("crownId") or "") for item in league_mappings}
+        mapped_pinnacle = {str(item.get("pinnacleId") or "") for item in league_mappings}
+        pinnacle_by_id = {
+            str(item.get("id") or ""): item for item in summarize_leagues(pinnacle_events)
+        }
+        crown_by_id = {
+            str(item.get("id") or ""): item for item in summarize_leagues(crown_events)
+        }
+        aliases = self._merge_aliases()
+        ranked = rank_league_candidates(
+            pinnacle_events, crown_events, limit=5, aliases=aliases
+        )
+
+        # A candidate is safe to auto-confirm only when it is the sole high
+        # scoring option for its Crown league and no other Crown league points
+        # to the same Pinnacle league above the threshold.
+        candidates = []
+        for crown_id, options in ranked.items():
+            if crown_id in mapped_crown:
+                continue
+            crown_name = (crown_by_id.get(crown_id) or {}).get("name")
+            high = [
+                item for item in options
+                # Country/event-count bonuses improve the human-facing ranking;
+                # auto-confirm still needs the original name+fixture evidence
+                # score above 85 and at least one matching fixture.
+                if float(item.get("baseScore") or 0) > AUTO_LEAGUE_SCORE_THRESHOLD
+                and int(item.get("evidenceCount") or 0) >= 1
+                and not competition_conflict(
+                    (pinnacle_by_id.get(str(item.get("pinnacleLeagueId") or "")) or {}).get("name"),
+                    crown_name,
+                )
+            ]
+            if len(high) != 1:
+                continue
+            candidate = high[0]
+            pinnacle_id = str(candidate.get("pinnacleLeagueId") or "")
+            if pinnacle_id in mapped_pinnacle:
+                continue
+            if crown_id not in crown_by_id or pinnacle_id not in pinnacle_by_id:
+                continue
+            candidates.append(candidate)
+
+        by_pinnacle: dict[str, list[dict[str, Any]]] = {}
+        for candidate in candidates:
+            by_pinnacle.setdefault(str(candidate["pinnacleLeagueId"]), []).append(candidate)
+
+        auto_candidates = [
+            candidate
+            for candidate in candidates
+            if len(by_pinnacle.get(str(candidate["pinnacleLeagueId"]), [])) == 1
+        ]
+        auto_candidates.sort(
+            key=lambda item: (-float(item.get("score") or 0), str(item.get("crownLeagueId") or ""))
+        )
+
+        mapped = []
+        skipped = []
+        for candidate in auto_candidates:
+            crown_id = str(candidate["crownLeagueId"])
+            pinnacle_id = str(candidate["pinnacleLeagueId"])
+            if crown_id in mapped_crown or pinnacle_id in mapped_pinnacle:
+                continue
+            try:
+                saved = self.merge_store.map_leagues(
+                    pinnacle_by_id[pinnacle_id], crown_by_id[crown_id]
+                )
+            except MappingConflict as exc:
+                skipped.append({
+                    "crownLeagueId": crown_id,
+                    "pinnacleLeagueId": pinnacle_id,
+                    "score": candidate.get("score"),
+                    "reason": str(exc),
+                })
+                continue
+            mapped.append({**saved, "score": candidate.get("score")})
+            mapped_crown.add(crown_id)
+            mapped_pinnacle.add(pinnacle_id)
+
+        league_mappings = self.merge_store.list_league_mappings()
+        pinnacle_league_by_crown = {
+            str(item.get("crownId") or ""): str(item.get("pinnacleId") or "")
+            for item in league_mappings
+        }
+        existing_mappings = self.merge_store.list_mappings()
+        mapped_pinnacle_events = {str(item.get("pinnacleId") or "") for item in existing_mappings}
+        mapped_crown_events = {str(item.get("crownId") or "") for item in existing_mappings}
+        pinnacle_event_by_id = {str(item.get("id") or ""): item for item in pinnacle_events}
+        crown_event_by_id = {str(item.get("id") or ""): item for item in crown_events}
+
+        ranked_fixtures = rank_candidates(
+            pinnacle_events,
+            crown_events,
+            limit=5,
+            aliases=aliases,
+            league_mapping=pinnacle_league_by_crown,
+        )
+        fixture_candidates = []
+        for pinnacle_id, options in ranked_fixtures.items():
+            if not pinnacle_id or pinnacle_id in mapped_pinnacle_events:
+                continue
+            pinnacle_event = pinnacle_event_by_id.get(pinnacle_id)
+            if not pinnacle_event:
+                continue
+            pinnacle_league_id = str(pinnacle_event.get("leagueId") or "")
+            eligible = []
+            for item in options:
+                crown_id = str(item.get("crownId") or "")
+                crown_event = crown_event_by_id.get(crown_id)
+                if not crown_event or crown_id in mapped_crown_events:
+                    continue
+                crown_league_id = str(crown_event.get("leagueId") or "")
+                if pinnacle_league_by_crown.get(crown_league_id) != pinnacle_league_id:
+                    continue
+                if item.get("reversedOrder"):
+                    continue
+                if competition_conflict(
+                    pinnacle_event.get("league"), crown_event.get("league")
+                ):
+                    continue
+                team_score = float(item.get("teamScore") or 0)
+                try:
+                    delta = (
+                        float(item.get("kickoffDeltaMinutes"))
+                        if item.get("kickoffDeltaMinutes") is not None
+                        else None
+                    )
+                except (TypeError, ValueError):
+                    delta = None
+                team_ok = team_score >= AUTO_FIXTURE_TEAM_FLOOR
+                high_score = float(item.get("score") or 0) > AUTO_FIXTURE_SCORE_THRESHOLD
+                if delta is None:
+                    # No usable kickoff on one side: only an overwhelmingly
+                    # strong name+league score may still auto-confirm.
+                    eligible_ok = high_score
+                else:
+                    # A known kickoff outside the window can never be rescued by
+                    # a high name score: that is how the senior Crown fixture
+                    # was once linked to the Pinnacle U19 fixture.
+                    eligible_ok = delta <= AUTO_MAP_TIME_MINUTES and team_ok
+                if not eligible_ok:
+                    continue
+                eligible.append(item)
+            if len(eligible) == 1:
+                fixture_candidates.append(eligible[0])
+
+        by_crown_event: dict[str, list[dict[str, Any]]] = {}
+        for candidate in fixture_candidates:
+            by_crown_event.setdefault(str(candidate.get("crownId") or ""), []).append(candidate)
+
+        mapped_fixtures = []
+        skipped_fixtures = []
+        fixture_order = sorted(
+            fixture_candidates,
+            key=lambda item: (-float(item.get("score") or 0), str(item.get("pinnacleId") or "")),
+        )
+        for candidate in fixture_order:
+            pinnacle_id = str(candidate.get("pinnacleId") or "")
+            crown_id = str(candidate.get("crownId") or "")
+            if len(by_crown_event.get(crown_id, [])) != 1:
+                continue
+            if pinnacle_id in mapped_pinnacle_events or crown_id in mapped_crown_events:
+                continue
+            try:
+                saved = self.merge_store.map_events(
+                    pinnacle_event_by_id[pinnacle_id], crown_event_by_id[crown_id]
+                )
+            except MappingConflict as exc:
+                skipped_fixtures.append({
+                    "pinnacleId": pinnacle_id,
+                    "crownId": crown_id,
+                    "score": candidate.get("score"),
+                    "reason": str(exc),
+                })
+                continue
+            mapped_fixtures.append({**saved, "score": candidate.get("score")})
+            mapped_pinnacle_events.add(pinnacle_id)
+            mapped_crown_events.add(crown_id)
+
+        self.send_json({
+            "ok": True,
+            "leagueThreshold": AUTO_LEAGUE_SCORE_THRESHOLD,
+            "fixtureThreshold": AUTO_FIXTURE_SCORE_THRESHOLD,
+            "fixtureTimeMinutes": AUTO_FIXTURE_TIME_MINUTES,
+            "fixtureTeamFloor": AUTO_FIXTURE_TEAM_FLOOR,
+            "mappedLeagues": mapped,
+            "mappedFixtures": mapped_fixtures,
+            "skipped": skipped,
+            "skippedFixtures": skipped_fixtures,
+            "leagueMappings": league_mappings,
+            "mappings": self.merge_store.list_mappings(),
         })
 
     def _handle_merge_mapping(self) -> None:
@@ -892,6 +1336,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 status=409,
             )
             return
+        if competition_conflict(pinnacle_event.get("league"), crown_event.get("league")):
+            self.send_json(
+                {
+                    "ok": False,
+                    "error": (
+                        "两场赛事的联赛类别不一致（青年/预备队/女子），"
+                        "不能关联；请确认选择的是同一场比赛。"
+                    ),
+                },
+                status=409,
+            )
+            return
         try:
             self.merge_store.map_events(pinnacle_event, crown_event)
         except MappingConflict as exc:
@@ -902,6 +1358,179 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         if args and str(args[1]).startswith("4"):
             super().log_message(fmt, *args)
+
+    def _partner_connection(self):
+        path = getattr(self, "partner_orders_path", None)
+        if not path:
+            return None
+        path = Path(path)
+        if not path.exists():
+            return None
+        try:
+            connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+            connection.row_factory = sqlite3.Row
+            return connection
+        except sqlite3.Error:
+            return None
+
+    def _my_events(self, query) -> None:
+        status = (query.get("status") or ["OPEN"])[0].strip().upper()
+        if status not in {"OPEN", "SETTLED", "ALL"}:
+            status = "OPEN"
+        agent = (query.get("agent") or [""])[0].strip() or None
+        search = (query.get("search") or [""])[0].strip()
+        try:
+            limit = max(1, min(200, int((query.get("limit") or ["50"])[0])))
+            offset = max(0, int((query.get("offset") or ["0"])[0]))
+        except ValueError:
+            self.send_json({"ok": False, "error": "limit 或 offset 格式不正确"}, status=400)
+            return
+        basis = (query.get("basis") or ["created"])[0].strip().lower()
+        if basis not in {"created", "settled"}:
+            basis = "created"
+        try:
+            tz_minutes = int((query.get("tz") or ["480"])[0])
+        except ValueError:
+            tz_minutes = 480
+        tz_minutes = max(-720, min(840, tz_minutes))
+        try:
+            from_value = (query.get("from") or [""])[0]
+            to_value = (query.get("to") or [""])[0]
+            from_ms = _parse_day(from_value, end=False, tz_minutes=tz_minutes)
+            to_ms = _parse_day(to_value, end=True, tz_minutes=tz_minutes)
+            from_utc, to_utc = _day_utc_bounds(from_value, to_value, tz_minutes=tz_minutes)
+        except ValueError:
+            self.send_json({"ok": False, "error": "日期格式必须是 YYYY-MM-DD"}, status=400)
+            return
+        connection = self._partner_connection()
+        if connection is None:
+            self.send_json({"ok": True, "ready": False, "total": 0, "rows": [],
+                            "agents": [], "status": status})
+            return
+        try:
+            payload = partner_orders.query_orders(
+                connection, None if status == "ALL" else status, agent, search, limit, offset,
+                from_ms, to_ms, basis=basis, from_utc=from_utc, to_utc=to_utc,
+            )
+            payload["agents"] = [dict(row) for row in connection.execute(
+                "SELECT code, level, name FROM partner_agents ORDER BY code"
+            )]
+        except sqlite3.Error as exc:
+            self.send_json({"ok": False, "error": f"订单库读取失败：{exc}"}, status=500)
+            return
+        finally:
+            connection.close()
+        payload.update({"ok": True, "ready": True, "status": status,
+                        "basis": basis, "tz": tz_minutes})
+        self.send_json(payload)
+
+    def _my_events_events(self, query) -> None:
+        raw = (query.get("cursor") or [""])[0].strip()
+        if raw == "":
+            cursor = None
+        else:
+            try:
+                cursor = int(raw)
+            except ValueError:
+                self.send_json({"ok": False, "error": "cursor 格式不正确"}, status=400)
+                return
+            if cursor < 0:
+                self.send_json({"ok": False, "error": "cursor 不能为负数"}, status=400)
+                return
+        connection = self._partner_connection()
+        if connection is None:
+            self.send_json({"ok": True, "ready": False, "cursor": 0,
+                            "reset": False, "events": []})
+            return
+        try:
+            payload = partner_orders.query_events(connection, cursor, 50)
+        except sqlite3.Error as exc:
+            self.send_json({"ok": False, "error": f"新单事件读取失败：{exc}"}, status=500)
+            return
+        finally:
+            connection.close()
+        payload.update({"ok": True, "ready": True})
+        self.send_json(payload)
+
+    def _my_events_summary(self, query) -> None:
+        agent = (query.get("agent") or [""])[0].strip() or None
+        basis = (query.get("basis") or ["created"])[0].strip().lower()
+        if basis not in {"created", "settled"}:
+            basis = "created"
+        try:
+            tz_minutes = int((query.get("tz") or ["480"])[0])
+        except ValueError:
+            tz_minutes = 480
+        tz_minutes = max(-720, min(840, tz_minutes))
+        try:
+            from_value = (query.get("from") or [""])[0]
+            to_value = (query.get("to") or [""])[0]
+            from_ms = _parse_day(from_value, end=False, tz_minutes=tz_minutes)
+            to_ms = _parse_day(to_value, end=True, tz_minutes=tz_minutes)
+            from_utc, to_utc = _day_utc_bounds(from_value, to_value, tz_minutes=tz_minutes)
+        except ValueError:
+            self.send_json({"ok": False, "error": "日期格式必须是 YYYY-MM-DD"}, status=400)
+            return
+        connection = self._partner_connection()
+        if connection is None:
+            self.send_json({"ok": True, "ready": False, "open": 0,
+                            "settled": 0, "states": []})
+            return
+        try:
+            payload = partner_orders.query_summary(
+                connection, agent, from_ms, to_ms,
+                basis=basis, from_utc=from_utc, to_utc=to_utc,
+            )
+        except sqlite3.Error as exc:
+            self.send_json({"ok": False, "error": f"订单汇总读取失败：{exc}"}, status=500)
+            return
+        finally:
+            connection.close()
+        payload.update({"ok": True, "ready": True, "basis": basis, "tz": tz_minutes})
+        self.send_json(payload)
+
+    def _telegram_status(self) -> None:
+        runner = getattr(self, "telegram_runner", None)
+        if runner is None:
+            self.send_json({"ok": False, "error": "TG 推送服务未启动"}, status=503)
+            return
+        payload = runner.state()
+        payload.update({"ok": True})
+        self.send_json(payload)
+
+    def _telegram_chats(self) -> None:
+        try:
+            config = load_config()
+        except Exception as exc:  # noqa: BLE001 - settings read must not crash
+            self.send_json({"ok": False, "error": f"读取配置失败：{exc}"}, status=500)
+            return
+        token = str(config.get("telegram_bot_token") or "").strip()
+        if not token:
+            self.send_json({"ok": False, "error": "请先保存机器人 Token"}, status=400)
+            return
+        try:
+            result = list_chats({
+                "token": token,
+                "proxy": str(config.get("telegram_proxy") or ""),
+            })
+        except RuntimeError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=502)
+            return
+        self.send_json({"ok": True, **result})
+
+    def _telegram_test(self) -> None:
+        runner = getattr(self, "telegram_runner", None)
+        if runner is None:
+            self.send_json({"ok": False, "error": "TG 推送服务未启动"}, status=503)
+            return
+        try:
+            runner.test()
+        except (ValueError, RuntimeError) as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=400)
+            return
+        payload = runner.state()
+        payload.update({"ok": True, "message": "测试消息已发送，请查看群聊"})
+        self.send_json(payload)
 
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
@@ -915,12 +1544,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self.send_json({"ok": False, "error": f"无法读取系统设置：{exc}"}, status=500)
             return
+        if parsed.path == "/api/my-events":
+            self._my_events(query)
+            return
+        if parsed.path == "/api/my-events/events":
+            self._my_events_events(query)
+            return
+        if parsed.path == "/api/my-events/summary":
+            self._my_events_summary(query)
+            return
+        if parsed.path == "/api/telegram/status":
+            self._telegram_status()
+            return
+        if parsed.path == "/api/telegram/chats":
+            self._telegram_chats()
+            return
         if parsed.path == "/api/merge":
             self.send_json(self._merge_payload())
             return
         if parsed.path == "/api/merge/confirmed":
             payload = self._merge_confirmed_payload(query)
             self.send_json(payload, status=400 if not payload.get("ok") else 200)
+            return
+        if parsed.path == "/api/merge/opportunities":
+            self.send_json(self._merge_opportunities_payload(query))
             return
         if parsed.path == "/api/metadata/status":
             self.send_json(self.metadata_runner.status())
@@ -986,11 +1633,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if is_crown_path(parsed.path):
             proxy_crown(self, "POST")
             return
+        if parsed.path == "/api/telegram/test":
+            self._telegram_test()
+            return
         if parsed.path == "/api/merge/mapping":
             self._handle_merge_mapping()
             return
         if parsed.path == "/api/merge/league-mapping":
             self._handle_merge_league_mapping()
+            return
+        if parsed.path in {"/api/merge/auto-map", "/api/merge/league-auto-map"}:
+            self._handle_merge_league_auto_mapping()
             return
         if parsed.path == "/api/settings/backup":
             self._backup_database()
@@ -1149,6 +1802,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
+_OPPORTUNITY_CACHE_LOCK = threading.Lock()
+
+
 class DashboardServer(ThreadingHTTPServer):
     """Own one dashboard's dependencies and close them in producer-first order."""
 
@@ -1169,6 +1825,9 @@ class DashboardServer(ThreadingHTTPServer):
         runner = getattr(self, "metadata_runner", None)
         if runner is not None:
             runner.close()
+        telegram = getattr(self, "telegram_runner", None)
+        if telegram is not None:
+            telegram.stop()
         store = getattr(self, "odds_store", None)
         if store is not None:
             store.close()
@@ -1182,6 +1841,7 @@ def build_server(host: str, port: int, config: Dict[str, Any]) -> ThreadingHTTPS
     server = DashboardServer((host, port), DashboardHandler)
     server.dashboard_config = dict(config)
     server.config_lock = threading.RLock()
+    server.partner_orders_path = get_path(config, "partner_orders_db_path")
     try:
         store = OddsStore(config)
         server.odds_store = store
@@ -1198,6 +1858,10 @@ def build_server(host: str, port: int, config: Dict[str, Any]) -> ThreadingHTTPS
             log_path=get_path(config, "log_dir") / "metadata_sync.log",
         )
         server.merge_store = FixtureMergeStore(get_path(config, "merge_db_path"))
+        server.telegram_runner = TelegramPusher(
+            Path(get_path(config, "partner_orders_db_path")).parent / "telegram_push.sqlite3"
+        )
+        server.telegram_runner.start()
         server.capture_tailer = CaptureTailer(store)
         server.capture_tailer.start()
     except BaseException:

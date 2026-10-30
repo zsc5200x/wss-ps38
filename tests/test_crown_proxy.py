@@ -69,7 +69,7 @@ class CrownProxyTests(unittest.TestCase):
         with patch("crown_proxy.http.client.HTTPConnection", return_value=connection) as ctor:
             crown_proxy.proxy_crown(handler, "GET")
 
-        ctor.assert_called_once_with("127.0.0.1", 8887, timeout=20)
+        ctor.assert_called_once_with("127.0.0.1", 9223, timeout=20)
         connection.request.assert_called_once_with(
             "GET", "/api/crown/events?compact=1", body=None, headers={"Accept": "*/*"}
         )

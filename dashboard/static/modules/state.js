@@ -1,12 +1,16 @@
 
 
+const _now = new Date(Date.now() - 240 * 60_000);
+const _pad = (value) => String(value).padStart(2, "0");
+const TODAY = `${_now.getUTCFullYear()}-${_pad(_now.getUTCMonth() + 1)}-${_pad(_now.getUTCDate())}`;
+
 export const state = {
   eventId: "",
   events: [],
   selectedEvent: null,
   odds: [],
   changes: [],
-  changeLimit: 8,
+  changeLimit: 20,
   filter: "all",
   search: "",
   sort: "stable",
@@ -36,6 +40,24 @@ export const state = {
   metadataRequesting: false,
   metadataWasRunning: false,
   currentPage: "home",
+  myEvents: {
+    status: "ALL",
+    agent: "",
+    search: "",
+    from: TODAY,
+    to: TODAY,
+    basis: "created",
+    tz: -240,
+    rows: [],
+    agents: [],
+    total: 0,
+    offset: 0,
+    loading: false,
+    ready: null,
+    lastCursor: null,
+    banner: [],
+    bannerTimer: null,
+  },
   settings: {
     config: {},
     defaults: {},

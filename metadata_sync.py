@@ -22,7 +22,12 @@ from playwright.sync_api import sync_playwright
 
 from src.providers.pinnacle.parser import iter_event_records, metadata_status
 from src.core.time import now_iso
-from project_config import PROJECT_DIR, get_path, load_config
+from project_config import (
+    PROJECT_DIR,
+    get_path,
+    load_config,
+    target_hosts as configured_target_hosts,
+)
 
 
 DEFAULT_STATUS_PATH = PROJECT_DIR / ".run" / "metadata_sync.status.json"
@@ -192,17 +197,44 @@ def fetch_metadata_batch(
     return page.evaluate(script, {"ids": list(event_ids), "concurrency": concurrency})
 
 
-def find_target_page(browser: Any, target_hosts: Iterable[str]) -> Any:
-    hosts = tuple(str(host).lower() for host in target_hosts)
+def find_target_page(
+    browser: Any,
+    target_hosts: Iterable[str],
+    preferred_path: str = "",
+) -> Any:
+    """Return the PS3838 page that can serve the sports-service API.
+
+    ``target_hosts`` also contains the partner backend (``ps38ag.com``).
+    Chrome tab order is not stable, so returning the first host match can pick
+    the partner page; the relative ``/sports-service`` fetch then receives the
+    partner app's HTML instead of event JSON.  When a preferred path is given,
+    only that page is accepted.
+    """
+    hosts = target_hosts
+    if isinstance(hosts, str):
+        hosts = hosts.split(",")
+    hosts = tuple(
+        str(host).strip().lower().lstrip(".")
+        for host in hosts
+        if str(host).strip()
+    )
+    fallback = None
     for context in browser.contexts:
         for page in context.pages:
             try:
-                host = (page.url.split("://", 1)[-1].split("/", 1)[0]).lower()
+                url = str(page.url or "")
+                host = (url.split("://", 1)[-1].split("/", 1)[0]).lower()
             except Exception:
                 continue
-            if any(host == item or host.endswith("." + item) for item in hosts):
-                return page
-    return None
+            if not any(host == item or host.endswith("." + item) for item in hosts):
+                continue
+            if preferred_path:
+                if preferred_path in url:
+                    return page
+                continue
+            if fallback is None:
+                fallback = page
+    return fallback
 
 
 def update_events_csv(path: Path, records: Sequence[Dict[str, Any]]) -> int:
@@ -356,12 +388,24 @@ def run_sync(
     records: List[Dict[str, Any]] = []
     failed_ids: List[str] = []
     cdp_url = str(config.get("cdp_url") or "http://127.0.0.1:9222")
-    target_hosts = config.get("target_hosts") or ["ps3838.com", "ps38ag.com"]
+    target_hosts = configured_target_hosts(config)
     try:
         with sync_playwright() as playwright:
             browser = playwright.chromium.connect_over_cdp(cdp_url)
-            page = find_target_page(browser, target_hosts)
+            page = find_target_page(
+                browser, target_hosts, preferred_path="/sports/soccer"
+            )
             if page is None:
+                opened = [
+                    str(item.url or "")
+                    for context in browser.contexts
+                    for item in context.pages
+                ]
+                print(
+                    "[metadata] 未找到足球页面 cdp="
+                    f"{cdp_url} hosts={target_hosts!r} pages={opened!r}",
+                    flush=True,
+                )
                 raise RuntimeError("没有找到目标平博页面，请先打开足球赔率页面")
             state["message"] = "正在查询赛事元数据"
             write_status(status_path, state)
@@ -397,10 +441,16 @@ def run_sync(
             write_status(status_path, state)
             state["updated"] = update_event_database(config, records)
             update_events_csv(get_path(config, "events_file"), records)
-        state["message"] = (
-            f"完成：查询 {state['processed']}，成功 {state['resolved']}，"
-            f"失败 {state['failed']}，写入 {state['updated'] if apply else 0}"
-        )
+        if state["resolved"]:
+            state["message"] = (
+                f"完成：查询 {state['processed']}，成功 {state['resolved']}，"
+                f"失败 {state['failed']}，写入 {state['updated'] if apply else 0}"
+            )
+        else:
+            state["message"] = (
+                f"未找到可补全数据：查询 {state['processed']}，"
+                f"失败 {state['failed']}（平博已不再返回这些赛事）"
+            )
     except Exception as exc:
         state["message"] = f"同步失败：{exc}"
         state["failed"] = len(candidates) - state["resolved"]

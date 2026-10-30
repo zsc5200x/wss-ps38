@@ -2,24 +2,10 @@ import { dom } from "../dom.js";
 import { renderEvents } from "./events.js";
 import { renderOdds } from "./markets.js";
 import { selectEvent } from "./snapshot.js";
-import { setupSectionCollapse } from "../shared/dom.js";
 import { SETTINGS_PREF_KEYS, writePreference } from "../shared/preferences.js";
 import { state } from "../state.js";
 
 export function bindPinnacleEvents() {
-  setupSectionCollapse(
-    dom.historyPanel,
-    dom.historyToggle,
-    dom.historyContent,
-    "ps3838.dashboard.historyCollapsed",
-  );
-  setupSectionCollapse(
-    dom.changesPanel,
-    dom.changesToggle,
-    dom.changesContent,
-    "ps3838.dashboard.changesCollapsed",
-  );
-
   dom.eventList.addEventListener("click", (event) => {
     const item = event.target.closest("[data-event-id]");
     if (item) selectEvent(item.dataset.eventId);

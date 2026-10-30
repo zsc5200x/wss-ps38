@@ -3,6 +3,11 @@ import { mergeRow, mergeCrownRow } from "./rows.js";
 import { el } from "../shared/dom.js";
 import { state } from "../state.js";
 
+function scoreClass(score) {
+  const value = Number(score) || 0;
+  return value >= 85 ? "high" : value >= 60 ? "medium" : "low";
+}
+
 export function renderLeagueBinding(league, source, mapping, pairedLeague, suggestions) {
   const section = el("div", `merge-league-binding${mapping ? " is-mapped" : " is-pending"}`);
   const leagueId = String(league.id);
@@ -37,8 +42,37 @@ export function renderLeagueBinding(league, source, mapping, pairedLeague, sugge
     section.append(el("span", "merge-status pending", "联赛 ID 缺失"));
     section.append(el("span", "merge-league-binding-help", "缺少联赛 ID，暂时无法建立联赛映射。"));
   } else {
+    const top = suggestions[0];
+    if (top) {
+      const card = el("div", "merge-league-candidate");
+      const topRow = el("div", "merge-candidate-top");
+      topRow.append(el("span", "merge-candidate-name", top.name));
+      topRow.append(el("span", `merge-score-badge ${scoreClass(top.score)}`, `${Math.round(Number(top.score) || 0)}`));
+      card.append(topRow);
+      const reasons = Array.isArray(top.reasons) ? top.reasons.filter(Boolean) : [];
+      const baseScore = Number(top.baseScore);
+      const score = Number(top.score);
+      if (Number.isFinite(baseScore) && Number.isFinite(score) && baseScore <= 85 && score > 85) {
+        reasons.push(`基础分 ${baseScore}，国家/场次加成仅用于排序`);
+      }
+      const reasonText = reasons.join(" · ");
+      if (reasonText) card.append(el("div", "merge-candidate-reasons", reasonText));
+      const actions = el("div", "merge-candidate-actions");
+      const confirm = el("button", "button primary merge-confirm-button", "确认此联赛");
+      confirm.type = "button";
+      confirm.dataset.mergeAction = "map-league-direct";
+      confirm.dataset.crownLeagueId = leagueId;
+      confirm.dataset.pinnacleLeagueId = String(top.id);
+      confirm.disabled = saving;
+      actions.append(confirm);
+      card.append(actions);
+      section.append(card);
+    }
+
+    const details = el("details", "merge-manual-picker");
+    details.open = Boolean(mapping) || !top;
+    details.append(el("summary", "", mapping ? "更换联赛绑定" : top ? "手动选择其他联赛" : "选择对应的平博联赛"));
     const form = el("div", "merge-league-bind-form");
-    form.append(el("span", "merge-status pending", mapping ? "更换联赛绑定" : "待确认联赛"));
     const label = el("label", "merge-picker-label", "选择对应的平博联赛");
     const inputId = `merge-pinnacle-league-${encodeURIComponent(leagueId)}`;
     label.htmlFor = inputId;
@@ -79,13 +113,13 @@ export function renderLeagueBinding(league, source, mapping, pairedLeague, sugge
     helper.dataset.mergeLeagueHelp = leagueId;
     helper.textContent = input.value
       ? "请确认皇冠与平博的联赛对应正确，再绑定比赛。"
-      : "按联赛名或联赛 ID 搜索；可参考下方评分候选。";
+      : "按联赛名或联赛 ID 搜索；可参考上方评分候选。";
     form.append(helper);
 
-    const options = suggestions.slice(0, 3);
+    const options = suggestions.slice(top ? 1 : 0, top ? 4 : 3);
     if (options.length) {
       const suggestionsBox = el("div", "merge-suggestions merge-league-suggestions");
-      suggestionsBox.append(el("span", "merge-suggestions-label", "平博联赛候选"));
+      suggestionsBox.append(el("span", "merge-suggestions-label", "其他平博联赛候选"));
       for (const candidate of options) {
         const button = el("button", "merge-suggestion", `${candidate.name} · 联赛 ID ${candidate.id}`);
         button.type = "button";
@@ -99,7 +133,8 @@ export function renderLeagueBinding(league, source, mapping, pairedLeague, sugge
       }
       form.append(suggestionsBox);
     }
-    section.append(form);
+    details.append(form);
+    section.append(details);
   }
 
   return section;
@@ -159,6 +194,18 @@ export function renderMergeLeagueGroup(league, source, context) {
     eventToggleRow.append(eventToggle);
     if (counterpartEvents.length) eventToggleRow.append(el("span", "merge-league-binding-help", `对应联赛内 ${counterpartEvents.length} 场赛事`));
     section.append(eventToggleRow);
+    const leagueMapped = league.events.filter((event) => {
+      const id = String(event.id);
+      return isCrown ? context.mappingsByCrown.has(id) : context.mappingsByPinnacle.has(id);
+    }).length;
+    const progressRow = el("div", "merge-league-progress-row");
+    progressRow.append(el("span", "merge-league-progress-label", `已绑定 ${leagueMapped} / ${league.events.length} 场`));
+    const progressBar = el("div", "merge-progress");
+    const progressFill = el("span");
+    progressFill.style.width = `${league.events.length ? (leagueMapped / league.events.length) * 100 : 0}%`;
+    progressBar.append(progressFill);
+    progressRow.append(progressBar);
+    section.append(progressRow);
   }
 
   if (open && mapping && pairId) {
@@ -166,7 +213,10 @@ export function renderMergeLeagueGroup(league, source, context) {
     list.id = `${sectionId}-events`;
     const listId = isCrown ? "mergePinnacleOptions" : "mergeCrownOptions";
     const timeKey = isCrown ? "startLabel" : "kickoff";
-    league.events.sort((a, b) => String(a[timeKey] || "").localeCompare(String(b[timeKey] || "")));
+    // Sort by the normalized Beijing kickoff, not each provider's raw zone.
+    league.events.sort((a, b) => String(
+      a.normalizedKickoff || a[timeKey] || ""
+    ).localeCompare(String(b.normalizedKickoff || b[timeKey] || "")));
     for (const event of league.events) {
       if (isCrown) {
         list.append(mergeCrownRow(event, context.mappingsByCrown, context.pinnacleById,

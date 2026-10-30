@@ -2,7 +2,7 @@
 
 项目通过 Chrome DevTools Protocol（CDP）复用用户已登录的普通 Chrome 标签页，采集平博 WSS 赔率与皇冠足球赛事，提供实时看板、历史查询及人工赛事绑定。
 
-账号密码、安全密码和 TOTP 由用户在站点页面手动输入。项目不自动填写或提交登录表单，不提供下注提交逻辑。“我的赛事”目前仅保留页面入口，未接入收藏或自动添加比赛。
+账号密码、安全密码和 TOTP 由用户在站点页面手动输入。项目不自动填写或提交登录表单，不提供下注提交逻辑。“我的赛事”展示平博代理订单：历史注单从 `partner_history_from`（默认 2026-07-01）回填，常驻服务每 1 秒轮询未结算订单，新单到达时在看板提示并刷新列表。
 
 已有数据的项目请先阅读 [运行数据迁移与回退](docs/operations.md#迁移运行数据)，不要用示例配置覆盖现有 `config.json`。
 
@@ -20,6 +20,24 @@
 完整启动顺序为：检查配置与 Python 环境 → 确认/启动 Chrome CDP → 启动平博采集 → 启动皇冠服务并按已配置账号补开普通标签页 → 启动主看板 → 启动实时快照。已有进程会核对项目归属；HTTP 服务只有通过接口健康检查才会报告就绪。进程就绪不等于数据新鲜，仍需看页面上的最后成功更新时间。
 
 平博和皇冠默认使用同一个 CDP 地址。皇冠没有配置账号时，启动脚本会跳过补开标签页；在皇冠设置中保存地址和账号、打开登录页，再由用户手动完成登录。已经登录时复用当前会话；旧保存会话被拒绝时，系统会尝试同步当前皇冠标签中的会话。
+
+“我的赛事”的订单采集复用同一个 Chrome 里已登录的 `ps38ag.com` 代理后台标签页，不需要复制 Cookie。首次使用先手工回填历史注单（会按配置的 `partner_history_from` 到当天逐月读取）：
+
+```bash
+.venv/bin/python backfill_partner_orders.py
+```
+
+之后 `./start.sh` 会同时拉起常驻轮询 `partner_orders_poll.py`，它每 1 秒读取已配置代理的未结算订单，每 300 秒回查近 7 天已结算状态，新单事件写入 `var/db/partner_orders.sqlite3`。代理后台会话失效时轮询器不会退出，会每 15 秒重试，重新登录后自动恢复。
+
+### 新单 TG 推送
+
+在「系统设置 → 新单 TG 推送」中填写机器人 Token、群 Chat ID，打开推送开关后保存，再点「发送测试消息」确认能收到。
+
+- **机器人 Token**：从 Telegram 的 @BotFather 创建机器人后获得，格式为 `123456789:AA...`；保存后接口只返回“已配置”，不会回显原始 Token。
+- **群 Chat ID**：群组 ID 以 `-100` 开头；公开群也可以填 `@群用户名`。机器人必须先被拉进群并允许发言。
+- **代理地址（可选）**：本机直连 `api.telegram.org` 不通时填写，例如 `http://127.0.0.1:7890`；不填则走系统环境变量里的代理。
+- 只有开启推送后新到达的订单会推送，不会把库里的历史订单一次性刷进群；推送失败会自动重试，结果记录在设置页。
+- Token 保存在本机 `config.json`，文件权限会收紧为仅本人可读；建议不要把它复制到共享位置。
 
 ## 第一次准备
 
@@ -67,10 +85,16 @@ DASHBOARD_PORT=8788 CROWN_PORT=8888 ./start.sh
 | `cdp_url` | `CAPTURE_CDP_URL`，其次 `CDP_URL` | `http://127.0.0.1:9222` |
 | `crown_cdp_url` | `CROWN_CDP_URL` | 留空则继承平博 CDP |
 | `dashboard_host / dashboard_port` | `DASHBOARD_HOST / DASHBOARD_PORT` | `127.0.0.1:8787` |
-| `crown_host / crown_port` | `CROWN_HOST / CROWN_PORT` | `127.0.0.1:8887` |
+| `crown_host / crown_port` | `CROWN_HOST / CROWN_PORT` | `127.0.0.1:9223` |
 | `capture_path` | `CAPTURE_OUTPUT`，其次 `CAPTURE_PATH` | 原始采集路径 |
 | `events_file / live_snapshot_file` | `EVENTS_FILE / LIVE_SNAPSHOT_FILE` | 赛事元数据与实时快照 |
 | `dashboard_db_path / merge_db_path` | `DASHBOARD_DB_PATH / MERGE_DB_PATH` | 历史库与人工映射库 |
+| `partner_orders_db_path` | `PARTNER_ORDERS_DB_PATH` | 平博代理订单库 |
+| `partner_backend_url` | `PARTNER_BACKEND_URL` | 代理后台第三个标签页地址 |
+| `partner_agents` | `PARTNER_AGENTS` | 轮询的代理代码，默认 `TLH0R02/03/04/28` |
+| `partner_history_from` | `PARTNER_HISTORY_FROM` | 历史回填起点，默认 `2026-07-01` |
+| `partner_open_interval_seconds` | `PARTNER_OPEN_INTERVAL_SECONDS` | OPEN 轮询目标间隔，默认 `1` |
+| `partner_settled_interval_seconds` | `PARTNER_SETTLED_INTERVAL_SECONDS` | SETTLED 回查间隔，默认 `300` |
 | `run_dir / log_dir / backup_dir` | `RUN_DIR / LOG_DIR / BACKUP_DIR` | PID、日志与备份目录 |
 | `crown_data_dir` | `CROWN_DATA_DIR` | 皇冠账号、加密会话与缓存目录 |
 
@@ -81,9 +105,9 @@ DASHBOARD_PORT=8788 CROWN_PORT=8888 ./start.sh
 - **主页**：按皇冠名称显示已确认关联且未结束的赛事，对照对应的皇冠与平博盘口，使用香港盘赔率。
 - **平博数据**：平博原始采集状态、赛事、盘口和历史。
 - **皇冠数据**：只展示皇冠赛事、盘口与会话状态，不混入平博盘口。
-- **我的赛事**：空页面入口，留待后续自行接入赛事。
-- **赛事合并**：先绑定联赛，再在确认的联赛范围内绑定比赛；评分只排序候选，不自动建立映射。
-- **系统设置**：浏览器、页面显示和相关状态设置。
+- **我的赛事**：展示平博代理订单，默认未结算优先；顶部汇总投注总量、已结算输赢、未结算/已结算单数，并按代理列出各自的投注量与输赢。明细含联赛、主队 vs 客队、盘口、水位、金额、输赢、订单号、代理、会员、结果与下单时间；已结算订单显示胜/负/赢半/输半/平/退还及对应输赢金额。金额只显示数值、不带币种后缀；盘口按中文习惯显示：大小球写作“大3/3.5”“小3.5”，让球写作“法马利康+0.5”“杜塞尔多夫-0.5/1”，四分之一盘展开为相邻半球（3.25→3/3.5、-0.25→-0/0.5）。支持状态切换、搜索、代理筛选、日期范围（今天/近7天/近30天/自定义），以及下单/结算口径与 GMT+8/GMT-4 时区切换（默认 GMT-4，结算口径 + GMT-4 可与代理后台盈亏报表对齐）；新单由常驻轮询写入本地库并提示。
+- **赛事合并**：先绑定联赛，再在确认的联赛范围内绑定比赛。已确认的联赛和队名会自动学习为别名参与评分；联赛唯一候选超过 85 分、比赛在联赛已绑定且统一时区后开赛时间相差不超过 15 分钟时可自动合并，其余保留人工确认。
+- **系统设置**：运行概况与数据维护、界面偏好、皇冠附加盘开关、采集/存储参数、新单 TG 推送和连接信息。
 
 平台 ID 属于各自编号空间，不能直接相等匹配。人工联赛和赛事映射保存在 `merge_db_path` 指定的 SQLite 中，不改写两家原始赛事。匹配逻辑默认将平博 `Asia/Shanghai` 与皇冠 `America/New_York` 转换到具体时刻比较，再以北京时间显示。站点时区不同可设置 `PS3838_EVENT_TIMEZONE`、`CROWN_EVENT_TIMEZONE` 和 `MERGE_DISPLAY_TIMEZONE`。
 

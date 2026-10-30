@@ -120,6 +120,8 @@ runtime_start dashboard "$PROJECT_DIR/dashboard_server.py" "$PYTHON_BIN" \
   "$DASHBOARD_URL/api/health" "$DASHBOARD_PORT" \
   --host "$DASHBOARD_HOST" --port "$DASHBOARD_PORT"
 runtime_start live_snapshot "$PROJECT_DIR/live_snapshot.py" "$PYTHON_BIN" "" ""
+runtime_start partner_orders "$PROJECT_DIR/partner_orders_poll.py" "$PYTHON_BIN" "" "" \
+  || echo "partner_orders 未能启动；请确认第三个标签页已登录代理后台。" >&2
 
 echo
 echo "项目进程已启动，看板和皇冠接口已就绪。数据是否更新请查看看板状态。"

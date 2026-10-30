@@ -6,13 +6,70 @@ from pathlib import Path
 
 from dashboard_server import HistoryDatabase
 from metadata_sync import (
+    find_target_page,
     parse_event_payload,
     update_event_database,
     update_events_csv,
 )
 
 
+class _FakePage:
+    def __init__(self, url):
+        self.url = url
+
+
+class _FakeContext:
+    def __init__(self, pages):
+        self.pages = pages
+
+
+class _FakeBrowser:
+    def __init__(self, pages):
+        self.contexts = [_FakeContext(pages)]
+
+
 class MetadataSyncTests(unittest.TestCase):
+    def test_find_target_page_prefers_soccer_over_partner(self):
+        partner = _FakePage(
+            "https://www.ps38ag.com/partner-ui-v2/report-outstanding-v2"
+        )
+        soccer = _FakePage("https://www.ps3838.com/zh-cn/sports/soccer")
+        browser = _FakeBrowser([partner, soccer])
+
+        page = find_target_page(
+            browser,
+            ["ps3838.com", "ps38ag.com"],
+            preferred_path="/sports/soccer",
+        )
+
+        self.assertIs(page, soccer)
+
+    def test_find_target_page_accepts_comma_separated_hosts(self):
+        soccer = _FakePage("https://www.ps3838.com/zh-cn/sports/soccer")
+        browser = _FakeBrowser([soccer])
+
+        page = find_target_page(
+            browser,
+            "ps3838.com,ps38ag.com",
+            preferred_path="/sports/soccer",
+        )
+
+        self.assertIs(page, soccer)
+
+    def test_find_target_page_requires_preferred_page_when_set(self):
+        partner = _FakePage(
+            "https://www.ps38ag.com/partner-ui-v2/report-outstanding-v2"
+        )
+        browser = _FakeBrowser([partner])
+
+        page = find_target_page(
+            browser,
+            ["ps3838.com", "ps38ag.com"],
+            preferred_path="/sports/soccer",
+        )
+
+        self.assertIsNone(page)
+
     def test_parse_event_payload(self):
         payload = {
             "n": [

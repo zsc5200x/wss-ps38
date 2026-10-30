@@ -1,5 +1,6 @@
 import { dom } from "./dom.js";
 import { refreshMerge } from "./merge/page.js";
+import { refreshMyEventsAll } from "./my-events/page.js";
 import { setStatus } from "./pinnacle/snapshot.js";
 import { renderSettingsStatusFromSnapshot } from "./settings-status.js";
 import { fetchSettings } from "./settings.js";
@@ -49,6 +50,7 @@ export function showPage(page, updateLocation = true) {
   const crownView = isCrownView(target);
   state.currentPage = target;
   document.body.classList.toggle("crown-mode", crownView);
+  document.body.classList.toggle("pinnacle-mode", target === "pinnacle");
   for (const button of dom.primaryNav.querySelectorAll("[data-page]")) {
     const active = button.dataset.page === target;
     button.classList.toggle("active", active);
@@ -72,6 +74,7 @@ export function showPage(page, updateLocation = true) {
   }
   syncPreferenceControls();
   if (target === "merge") refreshMerge();
+  if (target === "my-events") refreshMyEventsAll({ reset: true });
   syncCrownFrameActivity();
   document.title = {
     home: "皇冠赛事",

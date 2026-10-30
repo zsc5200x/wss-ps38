@@ -120,12 +120,17 @@ TARGET_HOSTS = SETTINGS["target_hosts"]
 ROTATION_MB = SETTINGS["rotation_mb"]
 DASHBOARD_URL = SETTINGS["dashboard_url"]
 PRESENCE_INTERVAL = SETTINGS["presence_interval"]
+try:
+    STALE_RELOAD_SECONDS = max(60.0, float(os.environ.get("CAPTURE_STALE_RELOAD_SECONDS", "600")))
+except ValueError:
+    STALE_RELOAD_SECONDS = 600.0
 
 sessions = {}
 socket_urls = {}
 count = 0
 write_errors = 0
 last_no_page_notice = None
+last_odds_at = 0.0
 
 
 def stamp():
@@ -174,7 +179,7 @@ def rotate_output_if_needed():
 
 
 def on_received(event):
-    global count, write_errors
+    global count, write_errors, last_odds_at
     count += 1
 
     frame = event.get("response") or {}
@@ -207,6 +212,9 @@ def on_received(event):
             data = json.loads(payload)
         except (ValueError, TypeError):
             pass
+
+    if data and data.get("type") == "UPDATE_ODDS":
+        last_odds_at = time.monotonic()
 
     print(
         f"[{count}] opcode={opcode} "
@@ -280,12 +288,16 @@ async () => {
               if (Array.isArray(stageData[0])) {
                 for (const item of stageData[0]) {
                   if (!Array.isArray(item) || item.length < 2) continue;
-                  // The compact snapshot stores each handicap pair as
-                  // [homeLine, awayLine]. Keep each actual value separately;
-                  // deriving one from the absolute value of the other swaps
-                  // the signs and makes live rows look withdrawn.
-                  const homeLine = Number(item[0]);
-                  const awayLine = Number(item[1]);
+                  // The compact snapshot stores each handicap pair from the
+                  // favourite's point of view: the side that *gives* goals has
+                  // a positive value (home -0.5 arrives as +0.5). The WSS odds
+                  // rows use the signed handicap instead (giving is negative),
+                  // so negate the compact values into the same key space.
+                  // Without this, every non-zero handicap row looks withdrawn
+                  // and the dashboard deletes it after a few presence checks,
+                  // leaving only the level-ball line visible.
+                  const homeLine = -Number(item[0]);
+                  const awayLine = -Number(item[1]);
                   if (Number.isFinite(homeLine)) {
                     keys.add(`0|2|0|${String(homeLine)}`);
                   }
@@ -517,9 +529,11 @@ async def attach_page(context, page):
 
 
 async def main():
-    global last_no_page_notice
+    global last_no_page_notice, last_odds_at
     last_presence_state = None
     next_presence_at = 0.0
+    next_watchdog_at = time.monotonic() + 60
+    last_odds_at = time.monotonic()
 
     print("CDP 地址:", CDP, flush=True)
     print("目标域名:", ", ".join(TARGET_HOSTS), flush=True)
@@ -610,6 +624,24 @@ async def main():
                     if state != last_presence_state:
                         print(f"[赛事校准失败] {exc}", flush=True)
                     last_presence_state = state
+
+            now_mono = time.monotonic()
+            if target_pages and now_mono >= next_watchdog_at:
+                next_watchdog_at = now_mono + 60
+                idle_seconds = now_mono - last_odds_at
+                if idle_seconds >= STALE_RELOAD_SECONDS:
+                    print(
+                        f"[看门狗] 赔率已 {idle_seconds / 60:.0f} 分钟未更新，"
+                        "刷新平博页面以重新订阅。",
+                        flush=True,
+                    )
+                    for _context, page in target_pages:
+                        try:
+                            await page.reload(wait_until="domcontentloaded", timeout=30000)
+                        except Exception as exc:
+                            print(f"[看门狗] 页面刷新失败：{exc}", flush=True)
+                    last_odds_at = time.monotonic()
+                    next_watchdog_at = last_odds_at + 120
 
             if not target_pages:
                 now = datetime.now().replace(microsecond=0)

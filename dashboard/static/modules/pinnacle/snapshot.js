@@ -1,7 +1,6 @@
 import { fetchJson } from "../shared/http.js";
 import { numberFormatter } from "../constants.js";
 import { dom } from "../dom.js";
-import { clearHistoryChart, renderHistoryControls } from "../history.js";
 import { renderEvents, renderSelected } from "./events.js";
 import { renderOdds, renderChanges } from "./markets.js";
 import { renderSettingsStatusFromSnapshot } from "../settings-status.js";
@@ -48,6 +47,10 @@ export function renderMetrics(snapshot) {
   dom.metricPartial.textContent = `部分 ${numberFormatter.format(stats.partial || 0)}`;
   dom.metricMessages.textContent = `消息 ${numberFormatter.format(stats.messages || 0)}`;
   dom.sourceText.textContent = snapshot.source?.capturePath || "capture.jsonl";
+  if (dom.pinnacleFeedStatus) {
+    const freshness = { live: "实时", delayed: "延迟", stale: "停止", offline: "离线" }[snapshot.freshness] || "等待";
+    dom.pinnacleFeedStatus.textContent = `${freshness} · 服务器 ${formatClock(snapshot.serverTime)}`;
+  }
   setStatus(snapshot.freshness);
 }
 
@@ -64,7 +67,6 @@ export function applySnapshot(snapshot) {
   renderSelected();
   renderChanges();
   renderOdds();
-  renderHistoryControls();
   renderSettingsStatusFromSnapshot(snapshot);
 }
 
@@ -95,12 +97,6 @@ export function selectEvent(eventId) {
   if (!eventId || eventId === state.eventId) return;
   state.eventId = eventId;
   state.selectedEvent = state.events.find((event) => event.id === eventId) || null;
-  state.historyPoints = [];
-  state.historySummary = null;
-  state.historyRowKey = "";
-  state.historyLastFetch = 0;
-  state.historyRowsSignature = "";
-  clearHistoryChart();
   const previousOdds = state.odds;
   state.odds = [];
   renderOdds();

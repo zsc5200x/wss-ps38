@@ -6,6 +6,8 @@ import { parseDate, formatClock, formatPrice, historyHongKong, formatDelta, hist
 import { state } from "./state.js";
 
 export function clearHistoryChart() {
+  // The Pinnacle page no longer renders the persisted-history chart.
+  if (!dom.historyGrid) return;
   dom.historyGrid.replaceChildren();
   dom.historyDots.replaceChildren();
   dom.historyArea.setAttribute("d", "");
@@ -22,6 +24,7 @@ export function clearHistoryChart() {
 }
 
 export function renderHistoryChart() {
+  if (!dom.historyGrid) return;
   const points = state.historyPoints
     .map((point) => ({ ...point, hongKongValue: historyHongKong(point) }))
     .filter((point) => point.hongKongValue !== null);
@@ -124,6 +127,7 @@ export function renderHistoryChart() {
 }
 
 export function renderHistoryControls() {
+  if (!dom.historyChart) return;
   const rows = state.odds.slice().sort((a, b) => (
     `${a.market}:${a.stage}:${a.option}:${a.line}`.localeCompare(`${b.market}:${b.stage}:${b.option}:${b.line}`)
   ));
@@ -162,6 +166,7 @@ export function renderHistoryControls() {
 }
 
 export async function fetchHistory(force = false) {
+  if (!dom.historyChart) return;
   if (!state.eventId || !state.historyRowKey) return;
   if (!force && Date.now() - state.historyLastFetch < 2200) return;
   const row = state.odds.find((item) => item.key === state.historyRowKey);

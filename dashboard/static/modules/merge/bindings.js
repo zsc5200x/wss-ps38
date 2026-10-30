@@ -170,6 +170,13 @@ export function bindMergeEvents() {
       saveMergeLeagueMapping("map", crownLeagueId, pinnacleLeagueId);
       return;
     }
+    if (action === "map-league-direct") {
+      const crownLeagueId = String(button.dataset.crownLeagueId || "");
+      const pinnacleLeagueId = String(button.dataset.pinnacleLeagueId || "");
+      if (!crownLeagueId || !pinnacleLeagueId) return;
+      saveMergeLeagueMapping("map", crownLeagueId, pinnacleLeagueId);
+      return;
+    }
     if (action === "unmap-league") {
       saveMergeLeagueMapping("unmap", String(button.dataset.crownLeagueId || ""));
       return;
@@ -232,6 +239,19 @@ export function bindMergeEvents() {
       saveMergeMapping("map", pinnacleId, crownId);
       return;
     }
+    if (action === "map-suggestion") {
+      const crownId = String(button.dataset.crownId || "");
+      if (!pinnacleId || !crownId) return;
+      const occupied = [...mergeMappedByPinnacle(state.merge.data).values()].some((mapping) =>
+        String(mapping.crownId) === crownId && String(mapping.pinnacleId) !== pinnacleId,
+      );
+      if (occupied) {
+        showToast("这场皇冠赛事已关联到另一场平博赛事，请刷新后重新选择");
+        return;
+      }
+      saveMergeMapping("map", pinnacleId, crownId);
+      return;
+    }
     if (action === "map-from-crown") {
       const crownId = String(button.dataset.crownId || "");
       const pinnacleId = state.merge.selectedPinnacleByCrown.get(crownId) || "";
@@ -245,6 +265,18 @@ export function bindMergeEvents() {
         return;
       }
       saveMergeMapping("map", pinnacleId, crownId);
+    }
+    if (action === "map-crown-suggestion") {
+      const crownId = String(button.dataset.crownId || "");
+      const targetPinnacleId = String(button.dataset.pinnacleId || "");
+      if (!crownId || !targetPinnacleId) return;
+      const existing = mergeMappedByPinnacle(state.merge.data).get(targetPinnacleId);
+      if (existing && String(existing.crownId) !== crownId) {
+        showToast("这场平博赛事已关联其他皇冠赛事，请先在平博视图解除原关联");
+        return;
+      }
+      saveMergeMapping("map", targetPinnacleId, crownId);
+      return;
     }
   });
 

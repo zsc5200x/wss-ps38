@@ -1,6 +1,76 @@
-import { describeSource } from "./source-status.js";
 import { fetchJson } from "./http.js";
-import { crownPinnacleQuote, crownPinnaclePrice } from "./pinnacle-format.js";
+import { crownPinnaclePrice } from "./pinnacle-format.js";
+
+function numericLine(value){
+  const text=String(value??"").normalize("NFKC").replace(/[–—−]/g,"-").replace(/\s+/g,"");
+  if(!text)return null;
+  const parts=text.split("/");
+  if(parts.length>2||parts.some(part=>!part))return null;
+  const values=parts.map(Number);
+  if(values.every(Number.isFinite)){
+    if(parts.length===2){
+      if(parts[0].startsWith("-")&&!parts[1].startsWith("+")&&!parts[1].startsWith("-"))values[1]=-Math.abs(values[1]);
+      if(parts[0].startsWith("+")&&!parts[1].startsWith("+")&&!parts[1].startsWith("-"))values[1]=Math.abs(values[1]);
+    }
+    return values.reduce((sum,value)=>sum+value,0)/values.length;
+  }
+  return null;
+}
+
+function lineText(value){
+  return String(value??"").normalize("NFKC").replace(/[–—−]/g,"-").replace(/\s+/g,"");
+}
+
+function canonicalLine(value){
+  const number=numericLine(value);
+  if(number!=null)return `n:${number.toFixed(3)}`;
+  return `s:${lineText(value).toLowerCase()}`;
+}
+
+function trimmedNumber(value){
+  return String(Number(value.toFixed(2)));
+}
+
+// Crown writes quarter-goal lines as split halves ("0/0.5" for 0.25,
+// "0.5/1" for 0.75). Use the same notation for Pinnacle so both sides of a
+// paired row read identically.
+function quarterLineText(number){
+  if(number==null||!Number.isFinite(number))return "";
+  if(Math.abs(number)<0.000001)return "0";
+  const magnitude=Math.abs(number);
+  const steps=Math.round(magnitude*4);
+  const sign=number<0?"-":"";
+  if(Math.abs(magnitude*4-steps)<0.000001&&steps%2===1){
+    return `${sign}${trimmedNumber(magnitude-0.25)}/${trimmedNumber(magnitude+0.25)}`;
+  }
+  return `${sign}${trimmedNumber(magnitude)}`;
+}
+
+function orientedLineText(value,market=""){
+  const number=numericLine(value);
+  if(number==null)return lineText(value);
+  const formatted=quarterLineText(number);
+  return market==="2"&&number>0?`+${formatted}`:formatted;
+}
+
+function rowIsQuoted(row){
+  return row?.quoted!==false&&(row?.hongKong!=null||Boolean(row?.hongKongLabel));
+}
+
+function nearestRow(rows,market,option,target){
+  const wanted=numericLine(target);
+  if(wanted==null)return null;
+  let best=null;
+  let distance=Infinity;
+  for(const row of rows){
+    if(String(row?.market||"")!==String(market)||String(row?.option||"")!==String(option))continue;
+    const value=numericLine(row?.line);
+    if(value==null)continue;
+    const gap=Math.abs(value-wanted);
+    if(gap<distance-0.000001){best=row;distance=gap;}
+  }
+  return best&&distance>0.000001?best:null;
+}
 
 /** Only the fixtures homepage requests and renders confirmed Pinnacle markets. */
 export function createConfirmedMarkets({ enabled = false, escapeHtml, onChange = () => {} }) {
@@ -21,25 +91,47 @@ export function createConfirmedMarkets({ enabled = false, escapeHtml, onChange =
     // persisted mapping snapshot while using the Crown snapshot as a fallback.
     return {...source,...event,markets:event.markets||source.markets||{},extra_markets:event.extra_markets||source.extra_markets||{}};
   }
-  function crownPinnacleMarketBook(title,rows,event,marketCode){
-    const list=(Array.isArray(rows)?rows:[]).filter(row=>String(row?.market||"")===String(marketCode)&&row?.quoted!==false&&(row?.hongKong!=null||row?.hongKongLabel));
-    if(!list.length)return `<article class="market-book market-book-pinnacle"><header class="market-book-head"><h3>${title} · 平博</h3><small>当前没有有效盘口</small></header><div class="market-empty">平博暂无对应报价</div></article>`;
-    const lines=list.map(row=>{
-      const label=crownPinnacleQuote(row,event);
-      const price=crownPinnaclePrice(row);
-      return `<div class="pinnacle-quote-row"><div class="pinnacle-quote-label"><strong>${crownEsc(label.label)}</strong><span>${crownEsc(label.line)}</span></div><strong class="pinnacle-price">${crownEsc(price)}</strong></div>`;
-    }).join("");
-    return `<article class="market-book market-book-pinnacle"><header class="market-book-head"><h3>${title} · 平博</h3><small>${list.length} 条 · HK</small></header><div class="pinnacle-table-head"><span>投注项</span><span>香港盘</span></div>${lines}</article>`;
-  }
-  function crownConfirmedMarkets(confirmed,event){
-    if(!confirmed)return "";
+  function crownPinnacleQuoteFor(confirmed,market,option,line){
+    if(!crownFixtures||!confirmed)return null;
     const pinnacle=confirmed.pinnacle||confirmed.pinnacleEvent||{};
     const rows=Array.isArray(pinnacle.odds)?pinnacle.odds:[];
-    const id=String(pinnacle.id||confirmed.pinnacleId||"");
-    const freshness=describeSource("平博",confirmed.sources?.pinnacle);
-    const header=`<div class="markets-provider-title pinnacle-provider-title"><div><strong>平博对应盘口</strong><span>仅显示已确认关联赛事 · ${crownEsc(freshness.text)}</span></div><small>平博 ID ${crownEsc(id||"—")}</small></div>`;
-    if(!rows.length)return `${header}<div class="market-book market-book-pinnacle market-book-pinnacle-empty"><div class="market-empty">已确认平博赛事，但当前还没有采集到对应盘口</div></div>`;
-    return `${header}${crownPinnacleMarketBook("胜平负",rows,event,"1")}${crownPinnacleMarketBook("让球",rows,event,"2")}${crownPinnacleMarketBook("大小球",rows,event,"3")}`;
+    const key=canonicalLine(line);
+    const row=rows.find(item=>String(item?.market||"")===String(market)
+      &&String(item?.option||"")===String(option)
+      &&canonicalLine(item?.line)===key);
+    if(!row){
+      const fallback=nearestRow(rows,market,option,line);
+      return {
+        price:"—",
+        line:orientedLineText(line,String(market)),
+        lineDiff:false,
+        quoted:false,
+        reason:"no_matching_line",
+        capturedAt:"",
+        direction:"",
+        delta:null,
+        alternate:fallback?{
+          line:orientedLineText(fallback.line,String(market)),
+          price:crownPinnaclePrice(fallback),
+          quoted:rowIsQuoted(fallback),
+          capturedAt:String(fallback?.capturedAt||""),
+        }:null,
+      };
+    }
+    const actualLine=orientedLineText(row.line,String(market));
+    const quoted=rowIsQuoted(row);
+    return {
+      price:quoted?crownPinnaclePrice(row):"—",
+      line:actualLine,
+      lineDiff:canonicalLine(actualLine)!==canonicalLine(line),
+      quoted,
+      reason:quoted?"":"no_quote",
+      capturedAt:String(row?.capturedAt||""),
+      // The WSS pipeline already records the last movement for each row; the
+      // homepage renders it exactly like the Pinnacle data panel.
+      direction:quoted?String(row?.direction||"flat"):"",
+      delta:quoted&&row?.delta!=null?Number(row.delta):null,
+    };
   }
   function crownConfirmedSummary(confirmed,event){
     if(!confirmed)return "";
@@ -52,7 +144,9 @@ export function createConfirmedMarkets({ enabled = false, escapeHtml, onChange =
     const crownId=String(event&&event.id||"");
     if(!crownId||crownConfirmedLoading.has(crownId))return;
     const lastAttempt=Number(crownConfirmedAttempts.get(crownId)||0);
-    if(!force&&Date.now()-lastAttempt<5000)return;
+    // The Crown iframe polls once per second; a slower throttle made the
+    // paired Pinnacle water visibly lag behind Crown updates.
+    if(!force&&Date.now()-lastAttempt<2000)return;
     crownConfirmedAttempts.set(crownId,Date.now());
     crownConfirmedLoading.add(crownId);
     try{
@@ -71,7 +165,8 @@ export function createConfirmedMarkets({ enabled = false, escapeHtml, onChange =
   return {
     get: crownConfirmedFor,
     mergeEvent: crownConfirmedCrownEvent,
-    renderMarkets: (confirmed, event) => enabled ? crownConfirmedMarkets(confirmed, event) : "",
+    quote: crownPinnacleQuoteFor,
+    renderMarkets: () => "",
     renderSummary: (confirmed, event) => enabled ? crownConfirmedSummary(confirmed, event) : "",
     load: crownLoadConfirmed,
   };

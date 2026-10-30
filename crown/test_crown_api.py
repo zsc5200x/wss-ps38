@@ -111,6 +111,22 @@ class CrownApiTests(unittest.TestCase):
         self.assertNotIn("leagues", payload)
         self.assertIn("cached", payload)
 
+    def test_event_snapshot_exposes_live_extra_market_setting(self):
+        with patch.object(app, "extra_markets_enabled", return_value=False):
+            status, _headers, body = self.request("GET", "/api/crown/events?compact=1")
+
+        self.assertEqual(status, 200)
+        self.assertFalse(json.loads(body)["extra_markets_enabled"])
+
+    def test_disabled_extra_market_endpoint_returns_success_without_loading(self):
+        result = {"status": "disabled", "gid": "123", "counts": {"handicap": 0, "total": 0, "moneyline": 0}}
+        with patch.object(app, "refresh_event_more", return_value=result) as refresh:
+            status, _headers, body = self.request("POST", "/api/crown/events/123/details")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["status"], "disabled")
+        refresh.assert_called_once_with("123")
+
     def test_combined_pages_and_endpoints_are_removed(self):
         for method, path in (
             ("GET", "/combined"),

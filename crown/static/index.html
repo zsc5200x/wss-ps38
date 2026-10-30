@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="dark">
 <meta name="theme-color" content="#080d16">
 <title>皇冠赛事 · Crown Odds Terminal</title>
-<link rel="stylesheet" href="/crown/static/app.css?v=20261029-2">
+<link rel="stylesheet" href="/crown/static/app.css?v=20261030-6">
 </head>
 <body>
 <div class="ambient ambient-a" aria-hidden="true"></div>
@@ -69,6 +69,18 @@
     <section class="details-panel panel" aria-label="皇冠赛事盘口详情">
       <div class="detail-scroll" id="crownEventDetail"><div class="detail-empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M4 5h16v14H4z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg><strong>选择一场皇冠赛事</strong><p>赛事列表加载后，这里会显示让球、大小球和全场胜平负盘口。</p><button class="button primary" type="button" data-open-login>连接皇冠会话</button></div></div>
     </section>
+
+    <aside class="opportunities-panel panel" id="crownOpportunities" aria-labelledby="opportunitiesTitle">
+      <div class="panel-title-row"><div><div class="eyebrow">OPPORTUNITY HUB</div><h2 id="opportunitiesTitle">机会</h2><p id="opportunitySubStatus">等待接入实时机会数据</p></div><span class="count-badge" id="opportunityBadge">0</span></div>
+      <div class="opportunity-list" id="opportunityList">
+        <div class="event-list-empty">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/><circle cx="12" cy="12" r="4"/></svg>
+          <strong>机会面板待接入</strong>
+          <p>这里会展示由左侧实时数据流计算出的机会。当前保留为空位，后续接入数据源后自动填充。</p>
+        </div>
+      </div>
+      <div class="event-list-footer"><span>READY FOR INTEGRATION</span><span id="opportunityTotal">0 条</span></div>
+    </aside>
   </main>
 
   <footer class="app-footer"><span>当前项目独立皇冠运行时 · 凭据和会话仅保存在本机</span><span>港赔 HK · 1 秒显示刷新</span></footer>
@@ -104,6 +116,6 @@
   </section>
 </div>
 
-<script type="module" src="/crown/static/app.js?v=20261030-2"></script>
+<script type="module" src="/crown/static/app.js?v=20261030-6"></script>
 </body>
 </html>

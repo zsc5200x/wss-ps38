@@ -28,7 +28,41 @@ class CrownOddsDisplayTests(unittest.TestCase):
             "IOR_REH": "1.02", "IOR_REC": "0.86",
             "IOR_RMH": "1.07", "IOR_RMN": "8.70", "IOR_RMC": "36.00",
         }, "live")
-        self.assertEqual(event["markets"]["moneyline"], ["1.07", "8.70", "36.00"])
+        # Crown's 1X2 feed is decimal; the public list is HK water.
+        self.assertEqual(event["markets"]["moneyline"], ["0.07", "7.70", "35.00"])
+
+    def test_handicap_line_direction_uses_strong_field(self):
+        home_gives = _normalize_event({
+            "GID": "1", "TEAM_H": "主队", "TEAM_C": "客队", "STRONG": "H",
+            "RATIO_R": "0.5 / 1", "IOR_RH": "1.12", "IOR_RC": "0.77",
+        }, "today")
+        self.assertEqual(home_gives["markets"]["handicap"][0]["line"], "-0.5 / 1")
+        away_gives = _normalize_event({
+            "GID": "1", "TEAM_H": "主队", "TEAM_C": "客队", "STRONG": "C",
+            "RATIO_R": "0.5", "IOR_RH": "1.07", "IOR_RC": "0.81",
+        }, "today")
+        self.assertEqual(away_gives["markets"]["handicap"][0]["line"], "+0.5")
+        live = _normalize_event({
+            "GID": "1", "TEAM_H": "主队", "TEAM_C": "客队", "STRONG": "C",
+            "IS_RB": "Y", "RATIO_RE": "0.5", "IOR_REH": "0.88", "IOR_REC": "1.00",
+        }, "live")
+        self.assertEqual(live["markets"]["handicap"][0]["line"], "+0.5")
+
+    def test_handicap_direction_falls_back_to_three_way_prices(self):
+        event = _normalize_event({
+            "GID": "1", "TEAM_H": "主队", "TEAM_C": "客队",
+            "RATIO_R": "1", "IOR_RH": "1.60", "IOR_RC": "4.00",
+            "IOR_MH": "1.55", "IOR_MN": "3.60", "IOR_MC": "5.20",
+        }, "today")
+        self.assertEqual(event["markets"]["handicap"][0]["line"], "-1")
+
+    def test_crown_three_way_is_exported_as_hong_kong_water(self):
+        event = _normalize_event({
+            "GID": "1", "TEAM_H": "主队", "TEAM_C": "客队",
+            "RATIO_R": "0.5", "IOR_RH": "0.74", "IOR_RC": "1.08",
+            "IOR_MH": "1.74", "IOR_MN": "3.40", "IOR_MC": "4.00",
+        }, "today")
+        self.assertEqual(event["markets"]["moneyline"], ["0.74", "2.40", "3.00"])
 
     def test_game_more_keeps_full_time_master_and_alternate_lines(self):
         rows = [
@@ -91,13 +125,23 @@ class CrownOddsDisplayTests(unittest.TestCase):
             "IOR_RMH": "1.07", "IOR_RMN": "8.70", "IOR_RMC": "36.00",
         }], "CROWN_HK", mode="live")
         self.assertEqual(
-            result["moneyline"][0]["home"], "1.07"
+            result["moneyline"][0]["home"], "0.07"
         )
         self.assertEqual(
             (result["moneyline"][0]["draw"], result["moneyline"][0]["away"]),
-            ("8.70", "36.00"),
+            ("7.70", "35.00"),
         )
 
+
+    def test_alternate_handicap_lines_follow_the_game_strong_side(self):
+        result = _normalize_more_markets([{
+            "GID": "300", "GIDM": "301", "HGID": "302", "MASTER": "N",
+            "MODE": "FT", "PTYPE": "", "RATIO": "0.5 / 1",
+            "IOR_RH": "1.12", "IOR_RC": "0.77",
+        }], "CROWN_HK", strong="C")
+        item = result["handicap"][0]
+        self.assertEqual(item["line"], "+0.75")
+        self.assertEqual(item["raw_line"], "+0.75")
 
 
 if __name__ == "__main__":

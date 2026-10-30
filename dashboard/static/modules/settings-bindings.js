@@ -4,8 +4,8 @@ import { fetchMetadataStatus } from "./metadata.js";
 import { renderEvents } from "./pinnacle/events.js";
 import { renderChanges } from "./pinnacle/markets.js";
 import { refresh } from "./pinnacle/snapshot.js";
-import { fetchSettings, saveSettings, runSettingsMaintenance } from "./settings.js";
-import { SETTINGS_PREF_KEYS, writePreference, saveSettingsPreferences } from "./shared/preferences.js";
+import { fetchSettings, runSettingsMaintenance, saveCrownExtraMarketsSetting, saveSettings, saveTelegramSettings, testTelegram, discoverTelegramChats } from "./settings.js";
+import { SETTINGS_PREF_KEYS, writePreference } from "./shared/preferences.js";
 import { state } from "./state.js";
 
 export function bindSettingsEvents() {
@@ -41,7 +41,7 @@ export function bindSettingsEvents() {
   });
 
   dom.settingsChangeLimit?.addEventListener("change", () => {
-    state.changeLimit = Number(dom.settingsChangeLimit.value) || 8;
+    state.changeLimit = Number(dom.settingsChangeLimit.value) || 20;
     writePreference(SETTINGS_PREF_KEYS.changeLimit, state.changeLimit);
     state.changesSignature = "";
     renderChanges(true);
@@ -51,11 +51,6 @@ export function bindSettingsEvents() {
     fetchSettings(true);
     refresh(true);
     fetchMetadataStatus(true);
-  });
-
-  dom.settingsSaveButton?.addEventListener("click", () => {
-    saveSettings();
-    saveSettingsPreferences();
   });
 
   dom.settingsMetadataCheckButton?.addEventListener("click", () => {
@@ -72,6 +67,25 @@ export function bindSettingsEvents() {
 
   dom.settingsIntegrityButton?.addEventListener("click", () => {
     runSettingsMaintenance("integrity");
+  });
+
+  dom.settingsTelegramSave?.addEventListener("click", () => {
+    saveTelegramSettings();
+  });
+
+  dom.settingsTelegramChats?.addEventListener("click", () => {
+    discoverTelegramChats();
+  });
+  dom.settingsTelegramTest?.addEventListener("click", () => {
+    testTelegram();
+  });
+
+  dom.settingsSaveButton?.addEventListener("click", () => {
+    saveSettings();
+  });
+
+  dom.settingsCrownExtraMarkets?.addEventListener("change", () => {
+    saveCrownExtraMarketsSetting();
   });
 
 }

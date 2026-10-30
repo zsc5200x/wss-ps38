@@ -7,6 +7,10 @@ import { renderMergeLeagueGroup } from "./leagues.js";
 import { el, showToast } from "../shared/dom.js";
 import { state } from "../state.js";
 
+const MERGE_AUTO_MAP_INTERVAL_MS = 120000;
+let mergeAutoMapAt = 0;
+let mergeAutoMapPromise = null;
+
 export function renderMergeWorkspace() {
   const data = state.merge.data;
   if (dom.mergeSourceStatus) {
@@ -99,11 +103,35 @@ export function renderMergeWorkspace() {
     list.sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
   }
 
+  const crownMapped = crownEvents.filter((event) => mappingsByCrown.has(String(event.id))).length;
+  const pinnacleMapped = pinnacleEvents.filter((event) => mappings.has(String(event.id))).length;
+  const crownPending = Math.max(0, crownEvents.length - crownMapped);
+  const pinnaclePending = Math.max(0, pinnacleEvents.length - pinnacleMapped);
+  const currentCrownLeagues = crownLeagues.filter((league) => (league.events || []).length);
+  const leagueMappedCurrent = currentCrownLeagues.filter(
+    (league) => leagueMappingsByCrown.has(String(league.id)),
+  ).length;
+  const leaguePending = Math.max(0, currentCrownLeagues.length - leagueMappedCurrent);
+  const totalPending = crownPending + pinnaclePending;
+
   dom.mergePinnacleCount.textContent = numberFormatter.format(pinnacleEvents.length);
   dom.mergeCrownCount.textContent = numberFormatter.format(crownEvents.length);
   dom.mergeMappedCount.textContent = numberFormatter.format(mappings.size);
-  const pendingCount = (state.merge.source === "crown" ? crownEvents.length : pinnacleEvents.length) - mappings.size;
-  dom.mergePendingCount.textContent = numberFormatter.format(Math.max(0, pendingCount));
+  dom.mergePendingCount.textContent = numberFormatter.format(totalPending);
+  if (dom.mergeCrownFoot) dom.mergeCrownFoot.textContent = `已绑定 ${crownMapped} · 待处理 ${crownPending}`;
+  if (dom.mergePinnacleFoot) dom.mergePinnacleFoot.textContent = `已绑定 ${pinnacleMapped} · 待处理 ${pinnaclePending}`;
+  if (dom.mergeLeagueMappedCount) dom.mergeLeagueMappedCount.textContent = `${leagueMappedCurrent}`;
+  if (dom.mergeLeagueFoot) dom.mergeLeagueFoot.textContent = `共 ${currentCrownLeagues.length} 个 · ${leaguePending} 待确认`;
+  const setProgress = (node, ratio) => {
+    if (node) node.style.width = `${Math.max(0, Math.min(100, ratio * 100)).toFixed(1)}%`;
+  };
+  setProgress(dom.mergeCrownProgress, crownEvents.length ? crownMapped / crownEvents.length : 0);
+  setProgress(dom.mergePinnacleProgress, pinnacleEvents.length ? pinnacleMapped / pinnacleEvents.length : 0);
+  setProgress(dom.mergeLeagueProgress, currentCrownLeagues.length ? leagueMappedCurrent / currentCrownLeagues.length : 0);
+  setProgress(
+    dom.mergeMappedProgress,
+    (crownEvents.length + pinnacleEvents.length) ? (crownMapped + pinnacleMapped) / (crownEvents.length + pinnacleEvents.length) : 0,
+  );
   for (const button of dom.mergeSourceButtons) {
     const active = button.dataset.mergeSource === state.merge.source;
     button.classList.toggle("active", active);
@@ -187,6 +215,8 @@ export function renderMergeWorkspace() {
       name: context.pinnacleLeagueById.get(String(item.pinnacleLeagueId || ""))?.name
         || String(item.pinnacleLeagueName || "未命名联赛"),
       score: item.score,
+      baseScore: item.baseScore,
+      evidenceCount: item.evidenceCount,
       reasons: item.reasons,
     });
   }
@@ -198,6 +228,34 @@ export function renderMergeWorkspace() {
   }
 }
 
+// Auto-confirm runs in the background so the merge list never waits on the
+// slower suggestion pass before it can render.
+async function autoMapMergeInBackground() {
+  if (mergeAutoMapPromise) return;
+  if (Date.now() - mergeAutoMapAt < MERGE_AUTO_MAP_INTERVAL_MS) return;
+  mergeAutoMapAt = Date.now();
+  mergeAutoMapPromise = (async () => {
+    try {
+      const { response, payload } = await fetchJson(
+        "/api/merge/auto-map",
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+        { timeoutMs: 30000, allowInvalidJson: true },
+      );
+      if (!response.ok || payload?.ok === false) return;
+      const leagues = Array.isArray(payload?.mappedLeagues) ? payload.mappedLeagues.length : 0;
+      const fixtures = Array.isArray(payload?.mappedFixtures) ? payload.mappedFixtures.length : 0;
+      if (!leagues && !fixtures) return;
+      showToast(`自动合并完成：联赛 ${leagues} 个，比赛 ${fixtures} 场`);
+      await refreshMerge(true);
+    } catch {
+      // Auto-confirm is best-effort; manual mapping and the next refresh retry.
+    }
+  })().finally(() => {
+    mergeAutoMapPromise = null;
+  });
+  return mergeAutoMapPromise;
+}
+
 export async function refreshMerge(force = false) {
   if (!dom.mergeGroups || state.merge.loading) return;
   if (!force && Date.now() - state.merge.lastFetchAt < 15000) return;
@@ -206,7 +264,7 @@ export async function refreshMerge(force = false) {
   const requestSerial = ++state.merge.requestSerial;
   if (!state.merge.data) dom.mergeLoading.classList.remove("hidden");
   try {
-    const { response, payload } = await fetchJson("/api/merge", { cache: "no-store" }, { timeoutMs: 15000 });
+    const { response, payload } = await fetchJson("/api/merge", { cache: "no-store" }, { timeoutMs: 20000 });
 
     if (!response.ok || payload?.ok === false) {
       throw new Error(payload?.error || "赛事列表读取失败");
@@ -228,6 +286,7 @@ export async function refreshMerge(force = false) {
       dom.mergeLoading.classList.add("hidden");
     }
   }
+  autoMapMergeInBackground();
 }
 
 export async function saveMergeMapping(action, pinnacleId, crownId = "") {

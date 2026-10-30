@@ -1,4 +1,4 @@
-import { mergeTeams, mergeFixtureLabel, mergeEventTime, mergeEventRawTime, mergeCrownOptionValue, mergePinnacleOptionValue } from "./helpers.js";
+import { mergeTeams, mergeFixtureLabel, mergeEventTimeLabel, mergeEventRawTime, mergeSourceTimezoneLabel, mergeCrownOptionValue, mergePinnacleOptionValue } from "./helpers.js";
 import { el } from "../shared/dom.js";
 import { state } from "../state.js";
 
@@ -9,7 +9,8 @@ export function mergeSourceBlock(source, event) {
   const leagueId = String(event?.leagueId || "--");
   const eventId = String(event?.id || "--");
   const sourceKind = isPinnacle ? "pinnacle" : "crown";
-  const time = mergeEventTime(event, sourceKind);
+  const normalizedTime = String(event?.normalizedKickoff || "").trim();
+  const time = mergeEventTimeLabel(event, sourceKind);
   const rawTime = mergeEventRawTime(event, sourceKind);
   const block = el("div", `merge-source merge-source-${source}`);
   const top = el("div", "merge-source-top");
@@ -19,8 +20,10 @@ export function mergeSourceBlock(source, event) {
   block.append(el("strong", "merge-source-teams", [home, away].filter(Boolean).join(" vs ") || "赛事名称待补全"));
   const details = el("div", "merge-source-details");
   details.append(el("span", "merge-source-time", time));
-  if (rawTime && rawTime !== time) {
-    details.append(el("span", "merge-id-pair", `原始时间 ${rawTime}`));
+  if (normalizedTime && rawTime && rawTime !== normalizedTime) {
+    details.append(
+      el("span", "merge-id-pair", `原始时间 ${rawTime}（${mergeSourceTimezoneLabel(event, sourceKind)}）`)
+    );
   }
   details.append(el("span", "merge-id-pair", `${idLabel} ${eventId}`));
   details.append(el("span", "merge-id-pair", `联赛 ID ${leagueId}`));
@@ -32,9 +35,38 @@ export function mergeSourceBlock(source, event) {
 
 export function mergeSuggestionReasons(suggestion) {
   const reasons = Array.isArray(suggestion?.reasons) ? suggestion.reasons.filter(Boolean) : [];
+  const baseScore = Number(suggestion?.baseScore);
+  const score = Number(suggestion?.score);
+  if (Number.isFinite(baseScore) && Number.isFinite(score) && baseScore <= 85 && score > 85) {
+    reasons.push(`基础分 ${baseScore}，国家/场次加成仅用于排序`);
+  }
   if (reasons.length) return reasons.join(" · ");
   const confidence = String(suggestion?.confidence || "");
   return confidence === "high" ? "队名与赛事信息较接近" : "候选需人工核对";
+}
+
+
+function scoreClass(score) {
+  const value = Number(score) || 0;
+  return value >= 85 ? "high" : value >= 60 ? "medium" : "low";
+}
+
+function mergeCandidateCard({ name, meta, reasons, score, action, dataset, label }) {
+  const card = el("div", "merge-event-candidate");
+  const top = el("div", "merge-candidate-top");
+  top.append(el("span", "merge-candidate-name", name));
+  top.append(el("span", `merge-score-badge ${scoreClass(score)}`, `${Math.round(Number(score) || 0)}`));
+  card.append(top);
+  if (meta) card.append(el("div", "merge-candidate-meta", meta));
+  if (reasons) card.append(el("div", "merge-candidate-reasons", reasons));
+  const actions = el("div", "merge-candidate-actions");
+  const button = el("button", "button primary merge-confirm-button", label || "确认关联");
+  button.type = "button";
+  button.dataset.mergeAction = action;
+  for (const [key, value] of Object.entries(dataset || {})) button.dataset[key] = value;
+  actions.append(button);
+  card.append(actions);
+  return card;
 }
 
 export function mergeRow(pinnacle, mappings, crownById, suggestions, availableCrownIds, optionsListId = "mergeCrownOptions") {
@@ -72,7 +104,7 @@ export function mergeRow(pinnacle, mappings, crownById, suggestions, availableCr
   }
 
   const heading = el("div", "merge-target-heading");
-  heading.append(el("span", `merge-status ${mapping ? "pending" : "pending"}`, mapping ? "正在更换关联" : "待人工确认"));
+  heading.append(el("span", "merge-status pending", mapping ? "正在更换关联" : "待人工确认"));
   if (mapping) {
     const cancel = el("button", "merge-text-button", "取消");
     cancel.type = "button";
@@ -83,13 +115,39 @@ export function mergeRow(pinnacle, mappings, crownById, suggestions, availableCr
   target.append(heading);
 
   const candidateBox = el("div", "merge-candidate-box");
-  const label = el("label", "merge-picker-label", "选择对应的皇冠赛事");
-  label.htmlFor = `merge-crown-picker-${pinnacleId}`;
-  candidateBox.append(label);
-
   const rowSuggestions = (suggestions.get(pinnacleId) || [])
     .filter((item) => availableCrownIds.has(String(item.crownId)))
-    .slice(0, 5);
+    .slice(0, 4);
+
+  const topSuggestion = rowSuggestions[0];
+  if (topSuggestion) {
+    const topEvent = crownById.get(String(topSuggestion.crownId));
+    if (topEvent) {
+      const [topHome, topAway] = mergeTeams(topEvent);
+      const meta = [
+        topEvent.league,
+        mergeEventTimeLabel(topEvent, "crown"),
+        topSuggestion.kickoffDeltaMinutes != null ? `时间差 ${topSuggestion.kickoffDeltaMinutes} 分钟` : "",
+      ].filter(Boolean).join(" · ");
+      candidateBox.append(mergeCandidateCard({
+        name: [topHome, topAway].filter(Boolean).join(" vs ") || mergeFixtureLabel(topEvent),
+        meta,
+        reasons: mergeSuggestionReasons(topSuggestion),
+        score: topSuggestion.score,
+        action: "map-suggestion",
+        dataset: { pinnacleId, crownId: String(topEvent.id) },
+        label: "确认关联",
+      }));
+    }
+  }
+
+  const details = el("details", "merge-manual-picker");
+  details.open = !topSuggestion || Boolean(mapping);
+  details.append(el("summary", "", topSuggestion ? "手动搜索其他皇冠赛事" : "选择对应的皇冠赛事"));
+
+  const label = el("label", "merge-picker-label", "选择对应的皇冠赛事");
+  label.htmlFor = `merge-crown-picker-${pinnacleId}`;
+  details.append(label);
 
   const input = el("input", "merge-picker");
   input.type = "search";
@@ -108,17 +166,18 @@ export function mergeRow(pinnacle, mappings, crownById, suggestions, availableCr
   save.dataset.pinnacleId = pinnacleId;
   save.disabled = !initialId || state.merge.savingPinnacleIds.has(pinnacleId);
   inputRow.append(save);
-  candidateBox.append(inputRow);
+  details.append(inputRow);
 
   const helper = el("div", "merge-picker-help");
   helper.dataset.mergeHelp = pinnacleId;
   helper.textContent = "可按队名、联赛或赛事 ID 搜索皇冠赛事；核对联赛和开赛时间后再确认。";
-  candidateBox.append(helper);
+  details.append(helper);
 
-  if (rowSuggestions.length) {
+  const alternatives = rowSuggestions.slice(topSuggestion ? 1 : 0);
+  if (alternatives.length) {
     const suggestionList = el("div", "merge-suggestions");
-    suggestionList.append(el("span", "merge-suggestions-label", "候选"));
-    for (const suggestion of rowSuggestions.slice(0, 3)) {
+    suggestionList.append(el("span", "merge-suggestions-label", topSuggestion ? "其他候选" : "候选"));
+    for (const suggestion of alternatives) {
       const event = crownById.get(String(suggestion.crownId));
       if (!event) continue;
       const optionButton = el("button", "merge-suggestion", mergeFixtureLabel(event));
@@ -132,9 +191,9 @@ export function mergeRow(pinnacle, mappings, crownById, suggestions, availableCr
       optionButton.append(el("small", "merge-suggestion-score", scoreText));
       suggestionList.append(optionButton);
     }
-    if (suggestionList.children.length > 1) candidateBox.append(suggestionList);
+    if (suggestionList.children.length > 1) details.append(suggestionList);
   }
-
+  candidateBox.append(details);
   target.append(candidateBox);
   row.append(target);
   return row;
@@ -172,9 +231,40 @@ export function mergeCrownRow(crown, mappingsByCrown, pinnacleById, mappingsByPi
   target.append(heading);
 
   const candidateBox = el("div", "merge-candidate-box");
+  const rowSuggestions = (suggestions.get(crownId) || [])
+    .filter((item) => allowedPinnacleIds.has(String(item.pinnacleId)))
+    .filter((item) => !mappingsByPinnacle.has(String(item.pinnacleId)))
+    .slice(0, 4);
+
+  const topSuggestion = rowSuggestions[0];
+  if (topSuggestion) {
+    const item = pinnacleById.get(String(topSuggestion.pinnacleId));
+    if (item) {
+      const [home, away] = mergeTeams(item);
+      const meta = [
+        item.league,
+        mergeEventTimeLabel(item, "pinnacle"),
+        topSuggestion.kickoffDeltaMinutes != null ? `时间差 ${topSuggestion.kickoffDeltaMinutes} 分钟` : "",
+      ].filter(Boolean).join(" · ");
+      candidateBox.append(mergeCandidateCard({
+        name: [home, away].filter(Boolean).join(" vs ") || mergeFixtureLabel(item),
+        meta,
+        reasons: mergeSuggestionReasons(topSuggestion),
+        score: topSuggestion.score,
+        action: "map-crown-suggestion",
+        dataset: { crownId, pinnacleId: String(item.id) },
+        label: "确认关联",
+      }));
+    }
+  }
+
+  const details = el("details", "merge-manual-picker");
+  details.open = !topSuggestion;
+  details.append(el("summary", "", topSuggestion ? "手动搜索其他平博赛事" : "选择对应的平博赛事"));
+
   const label = el("label", "merge-picker-label", "选择对应的平博赛事");
   label.htmlFor = `merge-pinnacle-picker-${crownId}`;
-  candidateBox.append(label);
+  details.append(label);
 
   const selectedPinnacleId = state.merge.selectedPinnacleByCrown.get(crownId) || "";
   const selectedPinnacle = pinnacleById.get(selectedPinnacleId);
@@ -196,23 +286,20 @@ export function mergeCrownRow(crown, mappingsByCrown, pinnacleById, mappingsByPi
   save.disabled = !selectedPinnacleId || (selectedMapping && String(selectedMapping.crownId) !== crownId)
     || state.merge.savingPinnacleIds.has(selectedPinnacleId);
   inputRow.append(save);
-  candidateBox.append(inputRow);
+  details.append(inputRow);
 
   const helper = el("div", "merge-picker-help");
   helper.dataset.mergeCrownHelp = crownId;
   helper.textContent = selectedMapping && String(selectedMapping.crownId) !== crownId
     ? "这场平博赛事已关联其他皇冠赛事，请先在平博视图解除原关联。"
     : "可按队名、联赛或赛事 ID 搜索平博赛事；核对联赛和开赛时间后再确认。";
-  candidateBox.append(helper);
+  details.append(helper);
 
-  const rowSuggestions = (suggestions.get(crownId) || [])
-    .filter((item) => allowedPinnacleIds.has(String(item.pinnacleId)))
-    .filter((item) => !mappingsByPinnacle.has(String(item.pinnacleId)))
-    .slice(0, 3);
-  if (rowSuggestions.length) {
+  const alternatives = rowSuggestions.slice(topSuggestion ? 1 : 0);
+  if (alternatives.length) {
     const suggestionList = el("div", "merge-suggestions");
-    suggestionList.append(el("span", "merge-suggestions-label", "候选平博赛事"));
-    for (const suggestion of rowSuggestions) {
+    suggestionList.append(el("span", "merge-suggestions-label", topSuggestion ? "其他候选" : "候选平博赛事"));
+    for (const suggestion of alternatives) {
       const item = pinnacleById.get(String(suggestion.pinnacleId));
       if (!item) continue;
       const optionButton = el("button", "merge-suggestion", mergeFixtureLabel(item));
@@ -226,9 +313,9 @@ export function mergeCrownRow(crown, mappingsByCrown, pinnacleById, mappingsByPi
       optionButton.append(el("small", "merge-suggestion-score", scoreText));
       suggestionList.append(optionButton);
     }
-    if (suggestionList.children.length) candidateBox.append(suggestionList);
+    if (suggestionList.children.length > 1) details.append(suggestionList);
   }
-
+  candidateBox.append(details);
   target.append(candidateBox);
   row.append(target);
   return row;

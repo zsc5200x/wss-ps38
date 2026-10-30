@@ -111,8 +111,11 @@ class SettingsApiTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["effective"]["presence_interval_seconds"], 5)
         self.assertEqual(payload["effective"]["capture_rotation_mb"], 512)
+        self.assertTrue(payload["effective"]["crown_extra_markets_enabled"])
         self.assertIn("presence_interval_seconds", payload["schema"])
+        self.assertEqual(payload["schema"]["crown_extra_markets_enabled"]["type"], "boolean")
         self.assertIn("capture_path", payload["readonly"])
+        self.assertEqual(payload["readonly"]["crown_service_url"], "http://127.0.0.1:9223")
         self.assertNotIn("cdp_url", payload["effective"])
         self.assertNotIn("password", json.dumps(payload, ensure_ascii=False).lower())
 
@@ -155,6 +158,26 @@ class SettingsApiTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("5 到 60", payload["error"])
 
+    def test_crown_extra_market_switch_persists_without_restart(self):
+        status, payload = self._request(
+            "PUT", "/api/settings", {"crown_extra_markets_enabled": False}
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["changed"], {"crown_extra_markets_enabled": False})
+        self.assertEqual(payload["restartRequired"], [])
+        self.assertFalse(payload["effective"]["crown_extra_markets_enabled"])
+        saved = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertIs(saved["crown_extra_markets_enabled"], False)
+
+    def test_crown_extra_market_switch_rejects_non_boolean_values(self):
+        status, payload = self._request(
+            "PUT", "/api/settings", {"crown_extra_markets_enabled": "false"}
+        )
+
+        self.assertEqual(status, 400)
+        self.assertIn("必须是布尔值", payload["error"])
+
     def test_backup_and_integrity_endpoints_return_predictable_results(self):
         self.store.flush_history()
 
@@ -167,6 +190,18 @@ class SettingsApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["result"], "ok")
+
+    def test_integrity_endpoint_checks_live_wal_instead_of_immutable_snapshot(self):
+        # The dashboard database has uncheckpointed WAL pages while collection
+        # is running; immutable=1 would produce false corruption errors.
+        with patch("dashboard_server.verify_database", return_value="ok") as verify:
+            status, payload = self._request("POST", "/api/settings/integrity", {})
+
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        verify.assert_called_once()
+        self.assertIs(verify.call_args.kwargs.get("immutable"), False)
+        self.assertIs(verify.call_args.kwargs.get("quick"), True)
 
 
 if __name__ == "__main__":

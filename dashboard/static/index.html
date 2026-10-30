@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#0a0f19">
   <title>赔率数据终端</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20261030-2">
+  <link rel="stylesheet" href="/static/styles.css?v=20261030-4">
 </head>
 <body>
   <div class="ambient ambient-a" aria-hidden="true"></div>
@@ -25,7 +25,7 @@
 
     </header>
 
-    <div id="pinnaclePage" class="page-view hidden" data-page-panel="pinnacle" aria-label="平博实时数据看板">
+    <div id="pinnaclePage" class="page-view pinnacle-page hidden" data-page-panel="pinnacle" aria-label="平博实时数据看板">
     <section class="metrics-grid" aria-label="实时指标">
       <article class="metric-card">
         <div class="metric-head">
@@ -77,6 +77,7 @@
           <div>
             <div class="eyebrow">LEAGUE RADAR</div>
             <h2>联赛雷达</h2>
+            <p id="pinnacleFeedStatus" class="panel-sub">正在读取实时数据…</p>
           </div>
           <span id="eventCount" class="count-badge">0</span>
         </div>
@@ -130,106 +131,36 @@
       </aside>
 
       <section class="content-column">
-        <article class="selected-panel panel">
-          <div class="selected-copy">
-            <div class="eyebrow">SELECTED EVENT</div>
-            <h2 id="selectedName">请选择一场赛事</h2>
-            <div class="selected-meta">
-              <span id="selectedLeague" class="meta-pill">联赛 --</span>
-              <span id="selectedScore" class="meta-pill score-pill" hidden>比分 --</span>
-              <span id="selectedClock" class="meta-pill clock-pill" hidden>比赛 --</span>
-              <span id="selectedKickoff" class="meta-pill">开赛 --</span>
-              <span id="selectedQuality" class="meta-pill">状态 --</span>
+        <article class="selected-panel panel pinnacle-hero" aria-label="选中赛事">
+          <h2 id="selectedName" class="sr-only">请选择一场赛事</h2>
+          <div class="match-league">
+            <div class="match-league-head">
+              <strong id="selectedLeague" class="match-league-name">联赛 --</strong>
+              <span id="selectedState" class="match-state">--</span>
+            </div>
+            <div class="match-league-ids">
+              <span id="selectedLeagueId" class="league-id-pill">平博联赛 ID --</span>
             </div>
           </div>
-          <div class="selected-stats">
-            <div><span>有效 / 总盘口</span><strong id="selectedQuotes">--</strong></div>
+          <div class="match-hero">
+            <div class="match-team"><span id="selectedHome" class="match-team-name">主队</span></div>
+            <div class="match-score">
+              <strong id="selectedScore">VS</strong>
+              <span id="selectedClock" class="match-sub" hidden>--</span>
+              <span id="selectedKickoff" class="match-sub">开赛 --</span>
+            </div>
+            <div class="match-team away"><span id="selectedAway" class="match-team-name">客队</span></div>
+          </div>
+          <div class="match-ids">
+            <span id="selectedMatchId" class="match-id-pill">平博比赛 ID --</span>
+            <span id="selectedQuality" class="meta-pill">状态 --</span>
+          </div>
+          <div class="pinnacle-summary" aria-label="选中赛事摘要">
+            <div><span>有效报价</span><strong id="selectedQuotes">--</strong></div>
+            <div><span>盘口行</span><strong id="selectedRows">--</strong></div>
             <div><span>数据更新</span><strong id="selectedChanged">--</strong></div>
           </div>
         </article>
-
-        <section id="historyPanel" class="history-panel panel">
-          <div class="section-heading history-heading">
-            <div class="section-toggle-copy">
-              <div class="eyebrow">PERSISTED HISTORY</div>
-              <button id="historyToggle" class="section-toggle" type="button" aria-expanded="true" aria-controls="historyContent">
-                <span class="section-toggle-title">香港赔率走势</span>
-                <span class="section-toggle-chevron" aria-hidden="true">
-                  <svg viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                </span>
-              </button>
-            </div>
-            <div class="history-controls">
-              <label class="compact-select history-row-select">
-                <span class="sr-only">选择盘口</span>
-                <select id="historyRowSelect" aria-label="选择要查询的盘口"></select>
-              </label>
-              <label class="compact-select">
-                <span class="sr-only">历史时间范围</span>
-                <select id="historyRangeSelect" aria-label="历史时间范围">
-                  <option value="1">近 1 小时</option>
-                  <option value="6">近 6 小时</option>
-                  <option value="24" selected>近 24 小时</option>
-                  <option value="168">近 7 天</option>
-                  <option value="720">近 30 天</option>
-                </select>
-              </label>
-              <button id="historyRefreshButton" class="icon-button" type="button" aria-label="刷新历史赔率" title="刷新历史赔率">
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M20 7v5h-5M4 17v-5h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-                  <path d="M18.2 9A7 7 0 0 0 6.1 6.8L4 9m16 6-2.1 2.2A7 7 0 0 1 5.8 15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-              </button>
-            </div>
-          </div>
-
-          <div id="historyContent" class="section-collapse-content">
-            <div class="history-status-row">
-              <span id="historyStatus" class="database-badge">SQLite · 等待查询</span>
-              <span id="historyRecordedAt" class="history-recorded">仅记录实际香港赔率变化</span>
-            </div>
-
-            <div class="history-summary" aria-label="香港赔率历史摘要">
-              <div><span>首个香港赔率</span><strong id="historyFirst">—</strong></div>
-              <div><span>最新香港赔率</span><strong id="historyLast">—</strong></div>
-              <div><span>最高香港赔率</span><strong id="historyHigh">—</strong></div>
-              <div><span>最低香港赔率</span><strong id="historyLow">—</strong></div>
-              <div><span>区间变化</span><strong id="historyMove">—</strong></div>
-            </div>
-
-            <div class="history-chart-shell">
-              <svg id="historyChart" class="history-chart" viewBox="0 0 920 250" preserveAspectRatio="none" role="img" aria-label="香港赔率历史走势图">
-                <g id="historyGrid"></g>
-                <path id="historyArea" class="history-area" d=""></path>
-                <path id="historyLine" class="history-line" d=""></path>
-                <g id="historyDots"></g>
-              </svg>
-              <div id="historyEmpty" class="history-empty">
-                <strong>等待历史数据</strong>
-                <p>新的香港赔率变化会自动写入 SQLite，随后显示在这里。</p>
-              </div>
-            </div>
-            <div id="historyError" class="history-error hidden" role="status"></div>
-          </div>
-        </section>
-
-        <section id="changesPanel" class="changes-panel panel">
-          <div class="section-heading changes-heading">
-            <div class="section-toggle-copy">
-              <div class="eyebrow">LIVE MOVEMENT</div>
-              <button id="changesToggle" class="section-toggle" type="button" aria-expanded="true" aria-controls="changesContent">
-                <span class="section-toggle-title">香港赔率变化流</span>
-                <span class="section-toggle-chevron" aria-hidden="true">
-                  <svg viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                </span>
-              </button>
-            </div>
-            <span id="changeCount" class="count-badge">0</span>
-          </div>
-          <div id="changesContent" class="section-collapse-content">
-            <div id="changeFeed" class="change-feed" aria-live="polite"></div>
-          </div>
-        </section>
 
         <section class="odds-panel panel">
           <div class="section-heading odds-heading">
@@ -280,6 +211,24 @@
           <div id="oddsBoard" class="market-board" aria-live="polite"></div>
         </section>
       </section>
+
+      <aside id="changesPanel" class="changes-panel panel changes-rail" aria-labelledby="changesTitle">
+        <div class="panel-title-row">
+          <div>
+            <div class="eyebrow">LIVE MOVEMENT</div>
+            <h2 id="changesTitle">赔率变化流</h2>
+            <p class="rail-sub">香港赔率 · 点击跳转赛事</p>
+          </div>
+          <span id="changeCount" class="count-badge">0</span>
+        </div>
+        <div id="changesContent" class="changes-rail-body">
+          <div id="changeFeed" class="change-feed" aria-live="polite"></div>
+        </div>
+        <div class="changes-footer">
+          <span class="stream-live"><i aria-hidden="true"></i>实时推送</span>
+          <span id="changeUpdatedAt">等待变化</span>
+        </div>
+      </aside>
     </main>
     </div>
 
@@ -305,13 +254,114 @@
       ></iframe>
     </section>
 
-    <section id="myEventsPage" class="page-view workspace-placeholder-page hidden" data-page-panel="my-events" aria-labelledby="myEventsTitle">
-      <header class="workspace-placeholder-heading">
-        <h1 id="myEventsTitle">我的赛事</h1>
+    <section id="myEventsPage" class="page-view my-events-page hidden" data-page-panel="my-events" aria-labelledby="myEventsTitle">
+      <header class="my-events-heading">
+        <div>
+          <div class="eyebrow">PINNACLE ORDERS</div>
+          <h1 id="myEventsTitle">我的赛事</h1>
+          <p id="myEventsSubtitle">未结算优先 · TLH0R02 / TLH0R03 / TLH0R04 / TLH0R28</p>
+        </div>
+        <div class="my-events-heading-actions">
+          <span id="myEventsStatus" class="my-events-status" role="status" aria-live="polite">读取中…</span>
+          <button id="myEventsRefresh" class="button ghost" type="button" title="刷新订单">刷新</button>
+        </div>
       </header>
-      <div id="myEventsContent" class="panel workspace-placeholder-state">
-        <strong>暂无赛事，待接入</strong>
+
+      <div class="my-events-overview-head">
+        <span id="myEventsScope" class="my-events-scope">下单时间 · GMT-4 · 今天</span>
+        <span class="my-events-scope-hint">投注总量为流水（含未结算），输赢为已结算净额</span>
       </div>
+
+      <div class="my-events-overview">
+        <article class="my-events-stat">
+          <span class="my-events-stat-label">投注总量</span>
+          <strong id="myEventsTotalStake">--</strong>
+          <span id="myEventsTotalOrders" class="my-events-stat-foot">-- 单</span>
+        </article>
+        <article class="my-events-stat">
+          <span class="my-events-stat-label">已结算输赢</span>
+          <strong id="myEventsNet">--</strong>
+          <span id="myEventsWinLose" class="my-events-stat-foot">赢 -- · 输 --</span>
+        </article>
+        <article class="my-events-stat">
+          <span class="my-events-stat-label">未结算</span>
+          <strong id="myEventsOpenCount">--</strong>
+          <span id="myEventsOpenStake" class="my-events-stat-foot">--</span>
+        </article>
+        <article class="my-events-stat">
+          <span class="my-events-stat-label">已结算</span>
+          <strong id="myEventsSettledCount">--</strong>
+          <span id="myEventsSettledStake" class="my-events-stat-foot">--</span>
+        </article>
+      </div>
+
+      <div id="myEventsAgents" class="my-events-agents" aria-label="各代理投注总量"></div>
+      <div id="myEventsAgentTotal" class="my-events-agent-total" aria-live="polite"></div>
+
+      <div class="my-events-toolbar">
+        <div class="my-events-tabs" role="group" aria-label="结算状态">
+          <button class="my-events-tab" type="button" data-my-events-status="OPEN" aria-pressed="false">未结算</button>
+          <button class="my-events-tab" type="button" data-my-events-status="SETTLED" aria-pressed="false">已结算</button>
+          <button class="my-events-tab active" type="button" data-my-events-status="ALL" aria-pressed="true">全部</button>
+        </div>
+        <label class="search-field my-events-search" for="myEventsSearch">
+          <input id="myEventsSearch" type="search" placeholder="搜索联赛、球队、会员、订单号" autocomplete="off" spellcheck="false">
+        </label>
+        <select id="myEventsAgent" class="my-events-select" aria-label="按代理筛选">
+          <option value="">全部代理</option>
+        </select>
+        <div class="my-events-dates">
+          <input id="myEventsFrom" class="my-events-date" type="date" aria-label="开始日期">
+          <span class="my-events-date-sep">至</span>
+          <input id="myEventsTo" class="my-events-date" type="date" aria-label="结束日期">
+        </div>
+        <div class="my-events-quick" role="group" aria-label="快捷日期">
+          <button class="my-events-quick-btn active" type="button" data-my-events-range="today">今天</button>
+          <button class="my-events-quick-btn" type="button" data-my-events-range="7">近7天</button>
+          <button class="my-events-quick-btn" type="button" data-my-events-range="30">近30天</button>
+          <button class="my-events-quick-btn" type="button" data-my-events-range="all">全部</button>
+        </div>
+        <span id="myEventsCount" class="my-events-count">-- 单</span>
+      </div>
+
+      <div class="my-events-basis-bar">
+        <span class="my-events-basis-label">统计口径</span>
+        <div class="my-events-basis" role="group" aria-label="日期口径">
+          <button class="my-events-basis-btn active" type="button" data-my-events-basis="created" aria-pressed="true">下单时间</button>
+          <button class="my-events-basis-btn" type="button" data-my-events-basis="settled" aria-pressed="false">结算时间</button>
+        </div>
+        <select id="myEventsTz" class="my-events-select my-events-tz" aria-label="时区">
+          <option value="-240" selected>代理后台 GMT-4</option>
+          <option value="480">北京时间 GMT+8</option>
+        </select>
+        <button id="myEventsAlignPartner" class="my-events-align-btn" type="button" title="结算时间 + GMT-4 + 昨日（对齐代理后台盈亏报表）">一键对齐后台</button>
+        <span class="my-events-basis-hint">代理后台盈亏报表默认按「结算时间 + GMT-4」统计</span>
+      </div>
+
+      <div id="myEventsBanner" class="my-events-banner hidden" role="status" aria-live="polite"></div>
+
+      <div class="my-events-table-wrap">
+        <table class="my-events-table">
+          <thead>
+            <tr>
+              <th>联赛</th>
+              <th>主队 vs 客队</th>
+              <th>盘口</th>
+              <th>水位</th>
+              <th>金额</th>
+              <th>输赢</th>
+              <th>订单号</th>
+              <th>代理</th>
+              <th>会员</th>
+              <th>结果</th>
+              <th id="myEventsTimeHeader">下单时间</th>
+            </tr>
+          </thead>
+          <tbody id="myEventsBody"></tbody>
+        </table>
+        <div id="myEventsEmpty" class="my-events-empty hidden">暂无订单</div>
+      </div>
+      <button id="myEventsMore" class="button ghost my-events-more hidden" type="button">加载更多</button>
     </section>
 
     <section id="mergePage" class="page-view merge-page hidden" data-page-panel="merge" aria-labelledby="mergePageTitle">
@@ -328,17 +378,45 @@
           <span>刷新</span>
         </button>
       </header>
-      <div class="merge-summary" aria-live="polite" aria-atomic="true">
-        <button id="mergeCrownSourceButton" class="merge-summary-source active" type="button" data-merge-source="crown" aria-pressed="true">
-          <strong id="mergeCrownCount">--</strong><span>皇冠赛事</span>
-        </button>
-        <button id="mergePinnacleSourceButton" class="merge-summary-source" type="button" data-merge-source="pinnacle" aria-pressed="false">
-          <strong id="mergePinnacleCount">--</strong><span>平博赛事</span>
-        </button>
-        <span><strong id="mergeMappedCount">--</strong> 已确认</span>
-        <span><strong id="mergePendingCount">--</strong> 待处理</span>
+      <div class="merge-overview" aria-live="polite">
+        <article class="merge-stat-card merge-stat-crown">
+          <div class="merge-stat-head">
+            <span class="merge-stat-label">皇冠赛事</span>
+            <span id="mergeCrownFoot" class="merge-stat-foot">--</span>
+          </div>
+          <strong class="merge-stat-value" id="mergeCrownCount">--</strong>
+          <div class="merge-progress" role="progressbar" aria-label="皇冠赛事绑定进度"><span id="mergeCrownProgress"></span></div>
+        </article>
+        <article class="merge-stat-card merge-stat-pinnacle">
+          <div class="merge-stat-head">
+            <span class="merge-stat-label">平博赛事</span>
+            <span id="mergePinnacleFoot" class="merge-stat-foot">--</span>
+          </div>
+          <strong class="merge-stat-value" id="mergePinnacleCount">--</strong>
+          <div class="merge-progress" role="progressbar" aria-label="平博赛事绑定进度"><span id="mergePinnacleProgress"></span></div>
+        </article>
+        <article class="merge-stat-card">
+          <div class="merge-stat-head">
+            <span class="merge-stat-label">联赛绑定</span>
+            <span id="mergeLeagueFoot" class="merge-stat-foot">--</span>
+          </div>
+          <strong class="merge-stat-value" id="mergeLeagueMappedCount">--</strong>
+          <div class="merge-progress" role="progressbar" aria-label="联赛绑定进度"><span id="mergeLeagueProgress"></span></div>
+        </article>
+        <article class="merge-stat-card">
+          <div class="merge-stat-head">
+            <span class="merge-stat-label">赛事绑定</span>
+            <span class="merge-stat-foot"><strong id="mergePendingCount">--</strong> 待处理</span>
+          </div>
+          <strong class="merge-stat-value" id="mergeMappedCount">--</strong>
+          <div class="merge-progress" role="progressbar" aria-label="赛事绑定进度"><span id="mergeMappedProgress"></span></div>
+        </article>
       </div>
       <div class="merge-toolbar">
+        <div class="merge-view-switch" role="group" aria-label="切换数据源">
+          <button id="mergeCrownSourceButton" class="merge-view-button active" type="button" data-merge-source="crown" aria-pressed="true">皇冠视图</button>
+          <button id="mergePinnacleSourceButton" class="merge-view-button" type="button" data-merge-source="pinnacle" aria-pressed="false">平博视图</button>
+        </div>
         <label class="search-field merge-search-field" for="mergeSearch">
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"/>
@@ -353,7 +431,7 @@
           <button class="merge-filter-button" type="button" data-merge-filter="mapped" aria-pressed="false">已确认</button>
         </div>
       </div>
-      <p class="merge-policy">平台赛事 ID 各自独立；开赛时间统一换算为北京时间参与匹配；系统只提供候选，确认后才建立映射。</p>
+      <p class="merge-policy">平台 ID 各自独立；开赛时间进入合并时自动统一换算为北京时间（皇冠原始时间为美东时间，平博原始时间为北京时间），列表与比较均使用换算后的时间；已确认的联赛/队名会作为别名参与评分。联赛名称与组内赛事的基础分超过 85 分且候选唯一时才自动绑定；同国家、赛事数量一致的加成只用于排序建议，不单独触发自动合并。比赛需在联赛已绑定且开赛时间相差不超过 15 分钟时自动合并，有歧义或冲突时保留待确认。</p>
       <div id="mergeSourceStatus" class="merge-source-status" role="status" aria-label="采集来源状态"></div>
       <div id="mergeError" class="merge-error hidden" role="alert"></div>
       <div id="mergeLoading" class="merge-state" role="status">正在读取两家赛事...</div>
@@ -369,7 +447,7 @@
         <div>
           <div class="eyebrow">CONTROL CENTER</div>
           <h1 id="settingsPageTitle">系统设置</h1>
-          <p>管理采集运行参数、历史数据维护和当前浏览器的看板偏好。</p>
+          <p>运行状态、采集参数、TG 推送与连接信息。</p>
         </div>
         <div class="settings-heading-actions">
           <span id="settingsSaveStatus" class="settings-save-status" role="status">读取配置中…</span>
@@ -380,7 +458,6 @@
             </svg>
             <span>刷新状态</span>
           </button>
-          <button id="settingsSaveButton" class="button primary" type="button">保存配置</button>
         </div>
       </header>
 
@@ -416,155 +493,188 @@
             <small id="settingsMetadataDetail">完整、部分和缺失赛事</small>
           </article>
         </div>
-      </section>
-
-      <div class="settings-grid">
-        <section class="settings-section" aria-labelledby="settingsPreferenceTitle">
-          <div class="settings-section-heading">
-            <div>
-              <div class="eyebrow">LOCAL PREFERENCE</div>
-              <h2 id="settingsPreferenceTitle">界面偏好</h2>
-            </div>
-            <span class="settings-section-meta">立即生效 · 保存在本机浏览器</span>
-          </div>
-          <div class="settings-form-grid">
-            <label class="settings-field">
-              <span>默认打开页面</span>
-              <select id="settingsDefaultPage">
-                <option value="home">主页</option>
-                <option value="pinnacle">平博数据</option>
-                <option value="crown">皇冠数据</option>
-                <option value="my-events">我的赛事</option>
-                <option value="merge">赛事合并</option>
-                <option value="settings">系统设置</option>
-              </select>
-            </label>
-            <label class="settings-field">
-              <span>默认赛事排序</span>
-              <select id="settingsDefaultSort">
-                <option value="stable">稳定排序</option>
-                <option value="kickoff">开赛时间</option>
-                <option value="name">比赛名称</option>
-              </select>
-            </label>
-            <label class="settings-field">
-              <span>默认元数据筛选</span>
-              <select id="settingsDefaultFilter">
-                <option value="all">全部</option>
-                <option value="complete">完整</option>
-                <option value="partial">部分</option>
-                <option value="missing">缺失</option>
-              </select>
-            </label>
-            <label class="settings-field">
-              <span>默认历史范围</span>
-              <select id="settingsDefaultHistory">
-                <option value="1">近 1 小时</option>
-                <option value="6">近 6 小时</option>
-                <option value="24">近 24 小时</option>
-                <option value="168">近 7 天</option>
-                <option value="720">近 30 天</option>
-              </select>
-            </label>
-            <label class="settings-field">
-              <span>变化流显示条数</span>
-              <select id="settingsChangeLimit">
-                <option value="8">8 条</option>
-                <option value="12">12 条</option>
-                <option value="24">24 条</option>
-              </select>
-            </label>
-          </div>
-        </section>
-
-        <section class="settings-section" aria-labelledby="settingsRuntimeTitle">
-          <div class="settings-section-heading">
-            <div>
-              <div class="eyebrow">COLLECTION RUNTIME</div>
-              <h2 id="settingsRuntimeTitle">采集与存储</h2>
-            </div>
-            <span class="settings-section-meta">保存后按提示重启对应服务</span>
-          </div>
-          <div class="settings-form-grid">
-            <label class="settings-field">
-              <span>赛事存在性检查间隔 <em>秒</em></span>
-              <input id="settingsPresenceInterval" type="number" min="5" max="60" step="1" inputmode="numeric">
-              <small>范围 5–60 秒，影响采集器检查页面是否仍有赛事。</small>
-            </label>
-            <label class="settings-field">
-              <span>实时快照处理间隔 <em>秒</em></span>
-              <input id="settingsSnapshotInterval" type="number" min="0.1" max="10" step="0.1" inputmode="decimal">
-              <small>范围 0.1–10 秒，过小会增加 CPU 和磁盘压力。</small>
-            </label>
-            <label class="settings-field">
-              <span>采集文件轮转大小 <em>MB</em></span>
-              <select id="settingsRotationMb">
-                <option value="0">关闭轮转</option>
-                <option value="128">128 MB</option>
-                <option value="256">256 MB</option>
-                <option value="512">512 MB</option>
-                <option value="1024">1 GB</option>
-              </select>
-            </label>
-            <label class="settings-field">
-              <span>旧采集文件压缩等待 <em>小时</em></span>
-              <input id="settingsCompressAfter" type="number" min="0" max="720" step="1" inputmode="numeric">
-              <small>只影响已经轮转的文件，0 表示不等待。</small>
-            </label>
-            <label class="settings-field">
-              <span>压缩文件最小大小 <em>MB</em></span>
-              <input id="settingsCompressMin" type="number" min="1" max="1024" step="1" inputmode="numeric">
-            </label>
-            <label class="settings-field">
-              <span>数据库备份保留数量 <em>份</em></span>
-              <input id="settingsBackupKeep" type="number" min="1" max="30" step="1" inputmode="numeric">
-            </label>
-          </div>
-          <div class="settings-paths" aria-label="当前数据路径">
-            <div><span>采集文件</span><code id="settingsCapturePath">--</code></div>
-            <div><span>SQLite 数据库</span><code id="settingsDatabasePath">--</code></div>
-            <div><span>备份目录</span><code id="settingsBackupPath">--</code></div>
-          </div>
-        </section>
-      </div>
-
-      <section class="settings-section" aria-labelledby="settingsMaintenanceTitle">
-        <div class="settings-section-heading">
-          <div>
-            <div class="eyebrow">DATA MAINTENANCE</div>
-            <h2 id="settingsMaintenanceTitle">数据维护</h2>
-          </div>
-          <span class="settings-section-meta">操作结果会显示在这里</span>
-        </div>
-        <div class="settings-maintenance-grid">
-          <div class="settings-maintenance-copy">
-            <strong id="settingsMaintenanceSummary">等待维护状态</strong>
-            <p id="settingsMaintenanceDetail">可以检查元数据、补全缺失赛事、备份数据库或检查 SQLite 完整性。</p>
-          </div>
-          <div class="settings-maintenance-actions">
+        <div class="settings-toolbar">
+          <span class="settings-toolbar-label">数据维护</span>
+          <div class="settings-maintenance-actions" role="group" aria-label="数据维护操作">
             <button id="settingsMetadataCheckButton" class="button ghost" type="button">检查元数据</button>
             <button id="settingsMetadataRepairButton" class="button primary" type="button">一键补全</button>
             <button id="settingsBackupButton" class="button ghost" type="button">立即备份数据库</button>
             <button id="settingsIntegrityButton" class="button ghost" type="button">检查 SQLite</button>
           </div>
         </div>
-        <p id="settingsMaintenanceResult" class="settings-maintenance-result" role="status"></p>
       </section>
 
-      <section class="settings-section settings-advanced-section" aria-labelledby="settingsAdvancedTitle">
+      <section class="settings-section settings-card" aria-labelledby="settingsPreferenceTitle">
         <div class="settings-section-heading">
           <div>
-            <div class="eyebrow">ADVANCED CONNECTION</div>
+            <div class="eyebrow">PREFERENCES &amp; COLLECTION</div>
+            <h2 id="settingsPreferenceTitle">偏好与采集</h2>
+          </div>
+          <span class="settings-section-meta">界面偏好仅本机 · 采集参数部分需重启</span>
+        </div>
+        <div class="settings-split">
+          <div class="settings-subgroup">
+            <h3 class="settings-subtitle">界面偏好</h3>
+            <div class="settings-form-grid settings-form-grid-compact">
+              <label class="settings-field">
+                <span>默认打开页面</span>
+                <select id="settingsDefaultPage">
+                  <option value="home">主页</option>
+                  <option value="pinnacle">平博数据</option>
+                  <option value="crown">皇冠数据</option>
+                  <option value="my-events">我的赛事</option>
+                  <option value="merge">赛事合并</option>
+                  <option value="settings">系统设置</option>
+                </select>
+              </label>
+              <label class="settings-field">
+                <span>默认赛事排序</span>
+                <select id="settingsDefaultSort">
+                  <option value="stable">稳定排序</option>
+                  <option value="kickoff">开赛时间</option>
+                  <option value="name">比赛名称</option>
+                </select>
+              </label>
+              <label class="settings-field">
+                <span>默认元数据筛选</span>
+                <select id="settingsDefaultFilter">
+                  <option value="all">全部</option>
+                  <option value="complete">完整</option>
+                  <option value="partial">部分</option>
+                  <option value="missing">缺失</option>
+                </select>
+              </label>
+              <label class="settings-field">
+                <span>默认历史范围</span>
+                <select id="settingsDefaultHistory">
+                  <option value="1">近 1 小时</option>
+                  <option value="6">近 6 小时</option>
+                  <option value="24">近 24 小时</option>
+                  <option value="168">近 7 天</option>
+                  <option value="720">近 30 天</option>
+                </select>
+              </label>
+              <label class="settings-field settings-field-wide">
+                <span>变化流显示条数</span>
+                <select id="settingsChangeLimit">
+                  <option value="8">8 条</option>
+                  <option value="12">12 条</option>
+                  <option value="20">20 条</option>
+                  <option value="24">24 条</option>
+                </select>
+              </label>
+            </div>
+            <p class="settings-subgroup-note">界面偏好只保存在本机浏览器，不影响服务端配置；右侧采集参数会写入 config.json。</p>
+          </div>
+          <div class="settings-subgroup">
+            <h3 class="settings-subtitle">采集与存储</h3>
+            <div class="settings-form-grid settings-form-grid-compact">
+              <div class="settings-field settings-field-wide">
+                <span>皇冠附加盘采集</span>
+                <label class="settings-switch">
+                  <input id="settingsCrownExtraMarkets" type="checkbox">
+                  <span>开启后采集皇冠附加盘；关闭可减少页面噪音和请求量</span>
+                </label>
+              </div>
+              <label class="settings-field">
+                <span>赛事检查间隔 <em>秒</em></span>
+                <input id="settingsPresenceInterval" type="number" min="5" max="60" step="1" inputmode="numeric">
+              </label>
+              <label class="settings-field">
+                <span>快照处理间隔 <em>秒</em></span>
+                <input id="settingsSnapshotInterval" type="number" min="0.1" max="10" step="0.1" inputmode="decimal">
+              </label>
+              <label class="settings-field">
+                <span>文件轮转大小</span>
+                <select id="settingsRotationMb">
+                  <option value="0">不轮转</option>
+                  <option value="128">128 MB</option>
+                  <option value="256">256 MB</option>
+                  <option value="512">512 MB</option>
+                  <option value="1024">1024 MB</option>
+                </select>
+              </label>
+              <label class="settings-field">
+                <span>压缩等待时间 <em>小时</em></span>
+                <input id="settingsCompressAfter" type="number" min="0" max="720" step="1" inputmode="numeric">
+              </label>
+              <label class="settings-field">
+                <span>压缩最小文件 <em>MB</em></span>
+                <input id="settingsCompressMin" type="number" min="1" max="1024" step="1" inputmode="numeric">
+              </label>
+              <label class="settings-field">
+                <span>备份保留数量 <em>份</em></span>
+                <input id="settingsBackupKeep" type="number" min="1" max="30" step="1" inputmode="numeric">
+              </label>
+            </div>
+            <div class="settings-card-actions settings-card-actions-sm">
+              <button id="settingsSaveButton" class="button primary settings-button-sm" type="button">保存采集设置</button>
+              <span class="settings-section-meta">部分参数需重启采集器或快照进程</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="settings-section settings-card" aria-labelledby="settingsTelegramTitle">
+        <div class="settings-section-heading">
+          <div>
+            <div class="eyebrow">TELEGRAM PUSH</div>
+            <h2 id="settingsTelegramTitle">新单 TG 推送</h2>
+          </div>
+          <span id="settingsTelegramState" class="settings-section-meta">未启用</span>
+        </div>
+        <div class="settings-form-grid settings-form-grid-3">
+          <div class="settings-field settings-field-wide">
+            <span>推送开关</span>
+            <label class="settings-switch">
+              <input id="settingsTelegramEnabled" type="checkbox">
+              <span>新单到达时推送到群</span>
+            </label>
+          </div>
+          <label class="settings-field">
+            <span>机器人 Token</span>
+            <input id="settingsTelegramToken" type="password" placeholder="未配置" autocomplete="off" spellcheck="false">
+          </label>
+          <label class="settings-field">
+            <span>Chat ID（群或私聊）</span>
+            <input id="settingsTelegramChat" type="text" placeholder="-100xxxxxxxxxx 群 ID，或私聊用户 ID" autocomplete="off" spellcheck="false">
+            <small class="settings-field-hint">群 ID 是 -100 开头的负数；机器人必须先被拉进群。私聊需要先给机器人发送 /start。</small>
+          </label>
+          <label class="settings-field">
+            <span>代理地址（可选）</span>
+            <input id="settingsTelegramProxy" type="text" placeholder="http://127.0.0.1:7890" autocomplete="off" spellcheck="false">
+          </label>
+        </div>
+        <div class="settings-card-actions settings-card-actions-sm">
+          <button id="settingsTelegramSave" class="button primary settings-button-sm" type="button">保存推送设置</button>
+          <button id="settingsTelegramTest" class="button ghost settings-button-sm" type="button">发送测试消息</button>
+          <button id="settingsTelegramChats" class="button ghost settings-button-sm" type="button">获取 Chat ID</button>
+          <span id="settingsTelegramMessage" class="settings-section-meta">配置后才会推送</span>
+        </div>
+        <div id="settingsTelegramChatList" class="settings-telegram-chats" aria-live="polite"></div>
+        <div id="settingsTelegramRecords" class="settings-telegram-records" aria-live="polite"></div>
+      </section>
+
+      <section class="settings-section settings-card settings-advanced-section" aria-labelledby="settingsAdvancedTitle">
+        <div class="settings-section-heading">
+          <div>
+            <div class="eyebrow">CONNECTION</div>
             <h2 id="settingsAdvancedTitle">连接信息</h2>
           </div>
           <span class="settings-section-meta">只读 · 修改请编辑配置并重启</span>
         </div>
         <div class="settings-readonly-grid">
           <div><span>CDP 地址</span><code id="settingsCdpUrl">--</code></div>
+          <div><span>皇冠服务地址</span><code id="settingsCrownServiceUrl">--</code></div>
           <div><span>目标域名</span><code id="settingsTargetHosts">--</code></div>
           <div><span>Chrome 配置目录</span><code id="settingsChromeProfile">--</code></div>
           <div><span>平博启动地址</span><code id="settingsStartUrl">--</code></div>
+          <div><span>代理后台地址</span><code id="settingsPartnerBackend">--</code></div>
+          <div><span>代理订单库</span><code id="settingsPartnerOrdersDb">--</code></div>
+          <div><span>代理范围</span><code id="settingsPartnerAgents">--</code></div>
+          <div><span>TG 推送</span><code id="settingsTelegramConnect">--</code></div>
         </div>
+        <p class="settings-connection-chain">数据链路：Chrome CDP → 平博赔率 / 皇冠赛事 / 代理订单 → 统一看板 → TG 推送</p>
       </section>
     </section>
 
@@ -578,6 +688,6 @@
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="/static/app.js?v=20261030-2"></script>
+  <script type="module" src="/static/app.js?v=20261030-4"></script>
 </body>
 </html>

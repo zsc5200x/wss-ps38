@@ -561,3 +561,308 @@
 }
 .merge-source-status-item.warning { color: var(--warning); }
 .merge-source-status-item.error { color: #ffb4c0; }
+
+/* ===== 赛事合并工作台：总览、联赛卡片、候选卡片 ===== */
+.merge-overview {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  padding: 2px 0 14px;
+}
+
+.merge-stat-card {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 7px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(160deg, rgba(18, 28, 45, 0.94), rgba(11, 18, 30, 0.96));
+}
+
+.merge-stat-card.merge-stat-crown {
+  border-color: rgba(244, 191, 95, 0.28);
+}
+
+.merge-stat-card.merge-stat-pinnacle {
+  border-color: rgba(110, 168, 255, 0.28);
+}
+
+.merge-stat-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.merge-stat-label {
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.merge-stat-foot {
+  color: var(--muted-2);
+  font-size: 0.65rem;
+  text-align: right;
+}
+
+.merge-stat-value {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 1.3rem;
+  font-weight: 650;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+.merge-progress {
+  position: relative;
+  overflow: hidden;
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.14);
+}
+
+.merge-progress > span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent-strong), var(--accent));
+  transition: width 280ms ease;
+}
+
+.merge-stat-crown .merge-progress > span {
+  background: linear-gradient(90deg, #d9a441, #f4bf5f);
+}
+
+.merge-stat-pinnacle .merge-progress > span {
+  background: linear-gradient(90deg, #4b7fd6, #6ea8ff);
+}
+
+.merge-view-switch {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: rgba(7, 12, 21, 0.58);
+}
+
+.merge-view-button {
+  min-height: 34px;
+  padding: 6px 12px;
+  color: var(--muted);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  font-size: 0.73rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.merge-view-button:hover {
+  color: var(--text-soft);
+}
+
+.merge-view-button.active {
+  color: #ffd894;
+  background: var(--warning-soft);
+}
+
+.merge-league-group {
+  margin-top: 12px;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: rgba(13, 21, 35, 0.72);
+}
+
+.merge-league-heading {
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.018);
+}
+
+.merge-league-heading-toggle {
+  padding: 12px 0;
+}
+
+.merge-league-group.is-open .merge-league-heading {
+  border-bottom-color: var(--border-strong);
+}
+
+.merge-league-binding,
+.merge-league-events-toggle-row,
+.merge-league-events {
+  padding-inline: 14px;
+}
+
+.merge-league-binding {
+  border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+}
+
+.merge-league-events-toggle-row {
+  border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+}
+
+.merge-league-events {
+  padding-bottom: 4px;
+}
+
+.merge-league-candidate,
+.merge-event-candidate {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 11px 12px;
+  border: 1px solid rgba(66, 230, 164, 0.24);
+  border-radius: var(--radius-md);
+  background: rgba(66, 230, 164, 0.05);
+}
+
+.merge-candidate-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.merge-candidate-name {
+  min-width: 0;
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.merge-candidate-meta {
+  color: var(--muted);
+  font-size: 0.68rem;
+  overflow-wrap: anywhere;
+}
+
+.merge-candidate-reasons {
+  color: var(--muted-2);
+  font-size: 0.66rem;
+  line-height: 1.5;
+}
+
+.merge-candidate-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.merge-score-badge {
+  flex: 0 0 auto;
+  min-width: 42px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-align: center;
+}
+
+.merge-score-badge.high {
+  color: #57f0b4;
+  background: rgba(66, 230, 164, 0.16);
+}
+
+.merge-score-badge.medium {
+  color: #ffd894;
+  background: rgba(244, 191, 95, 0.16);
+}
+
+.merge-score-badge.low {
+  color: #b6c2d4;
+  background: rgba(148, 163, 184, 0.14);
+}
+
+.merge-manual-picker {
+  margin-top: 6px;
+  padding: 8px 10px;
+  border: 1px dashed rgba(148, 163, 184, 0.22);
+  border-radius: var(--radius-md);
+}
+
+.merge-manual-picker > summary {
+  color: var(--muted);
+  font-size: 0.68rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.merge-manual-picker > summary::-webkit-details-marker {
+  display: none;
+}
+
+.merge-manual-picker > summary::before {
+  content: "▸ ";
+  color: var(--muted-2);
+}
+
+.merge-manual-picker[open] > summary::before {
+  content: "▾ ";
+}
+
+.merge-manual-picker[open] > summary {
+  margin-bottom: 8px;
+}
+
+.merge-league-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+}
+
+.merge-league-progress-label {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 0.66rem;
+}
+
+.merge-league-progress-row .merge-progress {
+  flex: 1;
+}
+
+.merge-row {
+  padding: 14px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+}
+
+.merge-row:last-child {
+  border-bottom: 0;
+}
+
+.merge-row.is-pending {
+  background: linear-gradient(90deg, transparent 0%, rgba(244, 191, 95, 0.03) 100%);
+}
+
+@media (max-width: 980px) {
+  .merge-overview {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .merge-overview {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .merge-view-switch {
+    width: 100%;
+  }
+
+  .merge-view-button {
+    flex: 1;
+  }
+}

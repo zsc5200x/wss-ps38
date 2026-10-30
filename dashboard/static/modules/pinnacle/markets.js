@@ -148,10 +148,11 @@ export function renderThreeWayMarket(rows) {
   section.append(createMarketHeader("胜平负", "1X2 · 全场 · 香港赔率", rows));
 
   const [home, away] = teamNames(state.selectedEvent?.name);
+  // Pinnacle's feed numbers the 1X2 selections 0=home, 1=away, 2=draw.
   const definitions = [
     { option: "0", label: "主胜", detail: home },
-    { option: "1", label: "和局", detail: "双方打平" },
-    { option: "2", label: "客胜", detail: away },
+    { option: "2", label: "和局", detail: "双方打平" },
+    { option: "1", label: "客胜", detail: away },
   ];
   const grid = el("div", "quote-grid three-way");
   grid.setAttribute("role", "row");
@@ -322,47 +323,66 @@ export function renderOdds() {
 }
 
 export function renderChanges(force = false) {
-  const signature = state.changes
-    .slice(0, state.changeLimit)
-    .map((change) => change.serial)
-    .join("|");
+  // Newest incremental odds changes first; the rail shows the latest window.
+  const ordered = state.changes.slice().sort((a, b) => Number(b.serial) - Number(a.serial));
+  const visible = ordered.slice(0, state.changeLimit);
+  const signature = visible.map((change) => change.serial).join("|");
   if (!force && signature === state.changesSignature) return;
+  const previous = new Set(String(state.changesSignature || "").split("|").filter(Boolean));
+  const firstRender = !state.changesSignature;
+  const previousScrollTop = dom.changeFeed.scrollTop;
+  const keepTop = previousScrollTop <= 8;
   state.changesSignature = signature;
   dom.changeCount.textContent = numberFormatter.format(state.changes.length);
   dom.changeFeed.replaceChildren();
   if (!state.changes.length) {
     dom.changeFeed.append(el("div", "change-empty", "等待新的赔率变化…"));
-    return;
+  } else {
+    const fragment = document.createDocumentFragment();
+    for (const change of visible) {
+      const card = el("button", "change-card");
+      card.type = "button";
+      card.dataset.eventId = change.eventId;
+      if (!firstRender && !previous.has(String(change.serial))) card.classList.add("is-new");
+      const selection = selectionLabel(change, change.eventName);
+      const hasOld = change.old !== null && change.old !== undefined;
+      const hasNew = change.new !== null && change.new !== undefined;
+      const stateClass = hasNew ? (change.direction || "flat") : "suspended";
+      card.classList.add(stateClass);
+      card.title = `${change.eventName} · ${marketLabel(change.market)} · ${stageLabel(change.stage)} · ${selection.primary}`;
+      const top = el("div", "change-card-top");
+      top.append(
+        el("span", "change-card-event", change.eventName || `赛事 ${change.eventId}`),
+        el(
+          "span",
+          `change-direction ${stateClass}`,
+          hasNew ? (change.direction === "new" ? "新" : iconArrow(change.direction)) : "撤"
+        )
+      );
+      const value = el("div", "change-card-value");
+      value.append(
+        el("span", "old", hasOld ? formatPrice(decimalToHongKong(change.old)) : "—"),
+        el("span", "arrow", "→"),
+        el("span", `new ${change.direction}`, hasNew ? formatPrice(decimalToHongKong(change.new)) : "撤盘")
+      );
+      const bottom = el("div", "change-card-bottom");
+      bottom.append(
+        el(
+          "span",
+          "change-card-market",
+          `${marketLabel(change.market)} · ${stageLabel(change.stage)} · ${selection.primary}`
+        ),
+        el("span", "change-card-time", formatClock(change.capturedAt))
+      );
+      card.append(top, value, bottom);
+      fragment.append(card);
+    }
+    dom.changeFeed.append(fragment);
+    dom.changeFeed.scrollTop = keepTop ? 0 : previousScrollTop;
   }
-  const fragment = document.createDocumentFragment();
-  for (const change of state.changes.slice(0, state.changeLimit)) {
-    const card = el("button", "change-card");
-    card.type = "button";
-    card.dataset.eventId = change.eventId;
-    const selection = selectionLabel(change, change.eventName);
-    card.title = `${change.eventName} · ${marketLabel(change.market)} · ${stageLabel(change.stage)} · ${selection.primary}`;
-    const top = el("div", "change-card-top");
-    top.append(
-      el("span", "change-card-event", change.eventName || `赛事 ${change.eventId}`),
-      el("span", `change-direction ${change.direction}`, iconArrow(change.direction))
-    );
-    const value = el("div", "change-card-value");
-    value.append(
-      el("span", "old", formatPrice(decimalToHongKong(change.old))),
-      el("span", "arrow", "→"),
-      el("span", `new ${change.direction}`, formatPrice(decimalToHongKong(change.new)))
-    );
-    const bottom = el("div", "change-card-bottom");
-    bottom.append(
-      el(
-        "span",
-        "change-card-market",
-        `${marketLabel(change.market)} · ${stageLabel(change.stage)} · ${selection.primary}`
-      ),
-      el("span", "", formatClock(change.capturedAt))
-    );
-    card.append(top, value, bottom);
-    fragment.append(card);
+  if (dom.changeUpdatedAt) {
+    dom.changeUpdatedAt.textContent = state.changes.length
+      ? `最新 ${formatClock(ordered[0].capturedAt)} · ${visible.length}/${state.changes.length}`
+      : "等待变化";
   }
-  dom.changeFeed.append(fragment);
 }

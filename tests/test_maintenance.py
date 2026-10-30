@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from dashboard_server import HistoryDatabase
-from maintenance import acquire_lock, backup_database, compress_capture_files
+from maintenance import acquire_lock, backup_database, compress_capture_files, verify_database
 
 
 class MaintenanceTests(unittest.TestCase):
@@ -17,6 +17,41 @@ class MaintenanceTests(unittest.TestCase):
                 self.assertTrue((directory / "maintenance.lock").exists())
                 with self.assertRaisesRegex(RuntimeError, "维护任务"):
                     acquire_lock({"run_dir": str(directory)})
+
+    def test_database_integrity_can_read_pending_wal(self):
+        with tempfile.TemporaryDirectory() as temp:
+            database_path = Path(temp) / "history.sqlite3"
+            database = HistoryDatabase(database_path)
+            # Keep a reader open so the committed writes stay in -wal instead
+            # of being checkpointed when the writer closes.
+            with sqlite3.connect(database_path) as keep_open:
+                keep_open.execute("SELECT count(*) FROM events").fetchone()
+                database.write_batch(
+                    [
+                        {
+                            "eventId": "100",
+                            "name": "Home VS Away",
+                            "league": "Test League",
+                            "kickoff": "2026-10-29T20:00:00+08:00",
+                            "metadataStatus": "complete",
+                            "updatedAt": "2026-10-28T05:00:00+08:00",
+                        }
+                    ],
+                    [],
+                )
+                wal_path = Path(str(database_path) + "-wal")
+                self.assertTrue(wal_path.is_file())
+                self.assertGreater(wal_path.stat().st_size, 0)
+                self.assertEqual(verify_database(database_path, immutable=False), "ok")
+                self.assertEqual(
+                    verify_database(database_path, immutable=False, quick=True), "ok"
+                )
+                with sqlite3.connect(
+                    f"file:{database_path.as_posix()}?mode=ro", uri=True
+                ) as reader:
+                    self.assertEqual(
+                        reader.execute("SELECT COUNT(*) FROM events").fetchone()[0], 1
+                    )
 
     def test_database_backup_is_consistent_and_retained(self):
         with tempfile.TemporaryDirectory() as temp:

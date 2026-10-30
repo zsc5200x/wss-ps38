@@ -77,6 +77,7 @@ class SourceFreshnessTests(unittest.TestCase):
         handler.config = {"crown_host": "127.0.0.1", "crown_port": 12345}
         handler.store = Mock()
         handler.store.snapshot.return_value = {"events": [], "freshness": "no-data", "source": {}}
+        handler.store.merge_events.return_value = []
         handler.store.event_details.return_value = None
         handler.merge_store = Mock()
         handler.merge_store.list_mappings.return_value = []

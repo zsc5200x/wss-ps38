@@ -14,7 +14,7 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 
 CROWN_HOST = "127.0.0.1"
-CROWN_PORT = 8887
+CROWN_PORT = 9223
 CROWN_TIMEOUT_SECONDS = 20
 MAX_PROXY_BODY_BYTES = 4 * 1024 * 1024
 FORWARD_REQUEST_HEADERS = ("Accept", "Content-Type", "Cookie", "Authorization")

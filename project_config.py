@@ -36,7 +36,8 @@ DEFAULTS: Dict[str, Any] = {
     "dashboard_host": "127.0.0.1",
     "dashboard_port": 8787,
     "crown_host": "127.0.0.1",
-    "crown_port": 8887,
+    "crown_port": 9223,
+    "crown_extra_markets_enabled": True,
     "backup_dir": "backups",
     "run_dir": ".run",
     "log_dir": "logs",
@@ -47,6 +48,17 @@ DEFAULTS: Dict[str, Any] = {
     "presence_interval_seconds": 5,
     "snapshot_interval_seconds": 2,
     "capture_rotation_mb": 0,
+    "partner_orders_db_path": "var/db/partner_orders.sqlite3",
+    "partner_backend_url": "https://www.ps38ag.com/partner-ui-v2/report-outstanding-v2",
+    "partner_agents": ["TLH0R02", "TLH0R03", "TLH0R04", "TLH0R28"],
+    "partner_history_from": "2026-07-01",
+    "partner_open_interval_seconds": 1,
+    "partner_settled_interval_seconds": 300,
+    "partner_settled_window_days": 7,
+    "telegram_enabled": False,
+    "telegram_bot_token": "",
+    "telegram_chat_id": "",
+    "telegram_proxy": "",
 }
 
 # The first nonempty alias wins; source-specific overrides precede shared ones.
@@ -72,6 +84,15 @@ ENV_OVERRIDES = {
     "crown_port": ("CROWN_PORT",),
     "dashboard_url": ("CAPTURE_DASHBOARD_URL",),
     "presence_interval_seconds": ("CAPTURE_PRESENCE_INTERVAL_SECONDS",),
+    "partner_orders_db_path": ("PARTNER_ORDERS_DB_PATH",),
+    "partner_backend_url": ("PARTNER_BACKEND_URL",),
+    "partner_agents": ("PARTNER_AGENTS",),
+    "partner_history_from": ("PARTNER_HISTORY_FROM",),
+    "partner_open_interval_seconds": ("PARTNER_OPEN_INTERVAL_SECONDS",),
+    "partner_settled_interval_seconds": ("PARTNER_SETTLED_INTERVAL_SECONDS",),
+    "telegram_bot_token": ("TELEGRAM_BOT_TOKEN",),
+    "telegram_chat_id": ("TELEGRAM_CHAT_ID",),
+    "telegram_proxy": ("TELEGRAM_PROXY",),
 }
 
 PATH_ALIASES = {
@@ -195,12 +216,20 @@ def shell_config(config: Dict[str, Any]) -> str:
         "DASHBOARD_URL": service_url(config, "dashboard"),
         "CROWN_URL": service_url(config, "crown"),
     }
+    agents = config.get("partner_agents") or []
+    if isinstance(agents, str):
+        agents = agents.split(",")
+    values["PARTNER_AGENTS"] = ",".join(str(item).strip() for item in agents if str(item).strip())
+    values["PARTNER_HISTORY_FROM"] = str(config.get("partner_history_from") or "")
+    values["PARTNER_OPEN_INTERVAL_SECONDS"] = str(config.get("partner_open_interval_seconds", 1))
+    values["PARTNER_SETTLED_INTERVAL_SECONDS"] = str(config.get("partner_settled_interval_seconds", 300))
     for variable, key in {
         "CAPTURE_PATH": "capture_path", "CAPTURE_OUTPUT": "capture_path",
         "EVENTS_FILE": "events_file", "LIVE_SNAPSHOT_FILE": "live_snapshot_file",
         "DASHBOARD_DB_PATH": "dashboard_db_path", "MERGE_DB_PATH": "merge_db_path",
         "BACKUP_DIR": "backup_dir", "RUN_DIR": "run_dir",
         "LOG_DIR": "log_dir", "CROWN_DATA_DIR": "crown_data_dir",
+        "PARTNER_ORDERS_DB_PATH": "partner_orders_db_path",
     }.items():
         values[variable] = str(get_path(config, key))
     return "\n".join(f"export {name}={shlex.quote(str(value))}" for name, value in values.items())

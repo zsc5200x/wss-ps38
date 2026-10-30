@@ -201,11 +201,28 @@ export function formatLineNumber(value) {
   return rounded === "-0" ? "0" : rounded;
 }
 
+export function formatQuarterLine(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return formatLineNumber(value);
+  if (Math.abs(number) < 0.000001) return "0";
+  const magnitude = Math.abs(number);
+  const quarterSteps = magnitude * 4;
+  const roundedSteps = Math.round(quarterSteps);
+  const sign = number < 0 ? "-" : "";
+  if (Math.abs(quarterSteps - roundedSteps) < 0.000001 && roundedSteps % 2 === 1) {
+    return `${sign}${formatLineNumber(magnitude - 0.25)}/${formatLineNumber(magnitude + 0.25)}`;
+  }
+  return `${sign}${formatLineNumber(magnitude)}`;
+}
+
+// Crown renders quarter-goal lines as split halves ("0/0.5" for 0.25,
+// "0.5/1" for 0.75) and keeps an explicit direction sign. Use the same
+// notation for Pinnacle rows so both columns read identically.
 export function formatHandicapLine(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return formatLineNumber(value);
   if (Math.abs(number) < 0.000001) return "0";
-  return `${number > 0 ? "+" : ""}${formatLineNumber(number)}`;
+  return `${number > 0 ? "+" : ""}${formatQuarterLine(number)}`;
 }
 
 export function formatTotalLine(value) {
@@ -227,9 +244,10 @@ export function teamNames(eventName) {
 export function selectionLabel(row, eventName) {
   const [home, away] = teamNames(eventName);
   if (String(row.market) === "1") {
+    // Pinnacle's 1X2 option codes are 0=home, 1=away, 2=draw.
     return {
-      primary: { 0: "主胜", 1: "和局", 2: "客胜" }[String(row.option)] || `选项 ${row.option}`,
-      detail: { 0: home, 1: "双方打平", 2: away }[String(row.option)] || "独赢",
+      primary: { 0: "主胜", 1: "客胜", 2: "和局" }[String(row.option)] || `选项 ${row.option}`,
+      detail: { 0: home, 1: away, 2: "双方打平" }[String(row.option)] || "独赢",
       line: "—",
     };
   }

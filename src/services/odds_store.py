@@ -5,7 +5,7 @@ import json
 import threading
 from collections import Counter, deque
 from datetime import datetime, timedelta
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, List, Optional
 from odds_utils import normalize_odds
 from project_config import get_path
 from src.core.constants import (RECENT_BOOTSTRAP_BYTES, HISTORY_LIMIT, CHANGE_LIMIT, MARKET_ROW_MISSES, MARKET_ROW_STALE_AFTER_SECONDS, MARKET_ROW_STALE_MISSES)
@@ -1117,18 +1117,121 @@ class OddsStore:
                 "changes": changes,
             }
 
-    def event_details(self, event_id: str) -> Optional[Dict[str, Any]]:
+    def merge_events(self, horizon_hours: float = 12.0) -> List[Dict[str, Any]]:
+        """Events the cross-book mapper may pair with a Crown fixture.
+
+        The dashboard itself only lists live and same-day fixtures, but Crown
+        publishes several days of fixtures at once.  Restricted to the daily
+        view, an early-morning Pinnacle fixture is invisible and the mapper can
+        only offer namesake competitions (a senior Crown fixture fell through to
+        a U19 event this way).  Widen the candidate pool to the next few hours
+        without changing the dashboard's own scope.
+        """
+        with self.lock:
+            now = datetime.now().astimezone()
+            horizon = now + timedelta(hours=max(0.0, float(horizon_hours)))
+            events: List[Dict[str, Any]] = []
+            for event in self.events.values():
+                scope = event_scope(event, now)
+                if scope:
+                    if not event_has_display_metadata(event):
+                        continue
+                else:
+                    if not event_has_display_metadata(event):
+                        continue
+                    kickoff = parse_kickoff(as_text(event.get("kickoff")), now)
+                    if kickoff is None or not (now <= kickoff <= horizon):
+                        continue
+                    # A live-flagged event outside the daily scope is still
+                    # eligible; mark it so the merge page can tell it apart.
+                    scope = "upcoming"
+                events.append({**event, "scope": scope})
+            events.sort(
+                key=lambda item: (
+                    item.get("lastCapturedAt") or "",
+                    item.get("quoteCount") or 0,
+                ),
+                reverse=True,
+            )
+            return events
+
+    def _confirmed_event_variant_id(
+        self, event_id: str, reference_event: Any = None
+    ) -> str:
+        """Find the freshest exact feed ID for a manually mapped fixture."""
+        key = str(event_id or "").strip()
+        if not key:
+            return ""
+        with self.lock:
+            reference = reference_event if isinstance(reference_event, dict) else None
+            if reference is None:
+                reference = self.events.get(key) or self.history_db.get_event(key)
+            if not isinstance(reference, dict):
+                return key
+
+            home = as_text(reference.get("home"))
+            away = as_text(reference.get("away"))
+            if not home or not away:
+                name_parts = as_text(reference.get("name")).split(" VS ", 1)
+                if len(name_parts) == 2:
+                    home = home or name_parts[0].strip()
+                    away = away or name_parts[1].strip()
+            kickoff = parse_kickoff(as_text(reference.get("kickoff")))
+            if not home or not away or kickoff is None:
+                return key
+
+            home_key, away_key = home.casefold(), away.casefold()
+            league_id = as_text(reference.get("leagueId") or reference.get("league_id"))
+            sport_id = as_text(reference.get("sportId") or reference.get("sport_id"))
+            candidates = []
+            for candidate_id, candidate in self.events.items():
+                candidate_home = as_text(candidate.get("home"))
+                candidate_away = as_text(candidate.get("away"))
+                if not candidate_home or not candidate_away:
+                    name_parts = as_text(candidate.get("name")).split(" VS ", 1)
+                    if len(name_parts) == 2:
+                        candidate_home = candidate_home or name_parts[0].strip()
+                        candidate_away = candidate_away or name_parts[1].strip()
+                if (candidate_home.casefold(), candidate_away.casefold()) != (home_key, away_key):
+                    continue
+
+                candidate_league = as_text(candidate.get("leagueId"))
+                candidate_sport = as_text(candidate.get("sportId"))
+                if league_id and candidate_league and league_id != candidate_league:
+                    continue
+                if sport_id and candidate_sport and sport_id != candidate_sport:
+                    continue
+                candidate_kickoff = parse_kickoff(as_text(candidate.get("kickoff")))
+                if candidate_kickoff is None or abs((candidate_kickoff - kickoff).total_seconds()) > 600:
+                    continue
+                candidates.append((candidate_id, candidate))
+
+            if not candidates:
+                return key
+            return max(
+                candidates,
+                key=lambda item: (
+                    as_text(item[1].get("lastCapturedAt")),
+                    bool(item[1].get("isLive")),
+                ),
+            )[0]
+
+    def event_details(
+        self, event_id: str, reference_event: Any = None
+    ) -> Optional[Dict[str, Any]]:
         """Return one Pinnacle event and its current full-time market rows.
 
         The regular snapshot intentionally filters out stale or incomplete
         events.  Confirmed merge mappings still need a direct lookup so the
         homepage can keep showing the provider pair while a feed is catching
-        up, therefore this method reads the in-memory event by ID without
-        applying the dashboard visibility filter.
+        up. If Pinnacle changes the fixture ID, the exact same fixture variant
+        with the freshest captured odds is used while the persisted mapping
+        remains stable; the feed's live flag can lag behind its odds updates.
         """
         key = str(event_id or "").strip()
         if not key:
             return None
+        key = self._confirmed_event_variant_id(key, reference_event)
         with self.lock:
             event = self.events.get(key)
             if event is None:
@@ -1148,3 +1251,64 @@ class OddsStore:
             )
             return {"event": {**event}, "odds": rows}
 
+    def event_rows(
+        self, event_id: str, reference_event: Any = None
+    ) -> Optional[Dict[str, Any]]:
+        """Lean event + current rows for the cross-book opportunity scan.
+
+        Unlike :meth:`event_details` this deliberately omits per-row history,
+        because the scanner reads every mapped fixture and only needs the
+        current water, direction and capture time.
+        """
+        key = str(event_id or "").strip()
+        if not key:
+            return None
+        key = self._confirmed_event_variant_id(key, reference_event)
+        with self.lock:
+            event = self.events.get(key)
+            if event is None:
+                event = self.history_db.get_event(key)
+            if event is None:
+                return None
+            rows = [
+                {
+                    "market": row.get("market"),
+                    "option": row.get("option"),
+                    "line": row.get("line"),
+                    "hongKong": row.get("hongKong"),
+                    "quoted": row.get("quoted"),
+                    "capturedAt": row.get("capturedAt"),
+                    "direction": row.get("direction"),
+                    "delta": row.get("delta"),
+                }
+                for row in self.odds_by_event.get(key, {}).values()
+                if is_full_time_market(row.get("stage"), row.get("market"))
+            ]
+            return {"event": {**event}, "rows": rows}
+
+    def freshness_snapshot(self) -> Dict[str, Any]:
+        """Minimal snapshot for source freshness without serialising events."""
+        with self.lock:
+            last_captured_at = self.last_captured_at
+        lag_seconds: Optional[int] = None
+        if last_captured_at:
+            try:
+                captured = datetime.fromisoformat(last_captured_at)
+                lag_seconds = max(
+                    0, int((datetime.now().astimezone() - captured).total_seconds())
+                )
+            except ValueError:
+                pass
+        if lag_seconds is None:
+            freshness = "no-data"
+        elif lag_seconds <= 30:
+            freshness = "live"
+        elif lag_seconds <= 120:
+            freshness = "delayed"
+        else:
+            freshness = "stale"
+        return {
+            "source": {"lastCapturedAt": last_captured_at},
+            "freshness": freshness,
+            "lagSeconds": lag_seconds,
+        }

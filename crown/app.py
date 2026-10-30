@@ -19,13 +19,14 @@ from crown_runtime import (
     initialize as initialize_crown,
     lock as crown_runtime_lock,
     public_accounts,
+    extra_markets_enabled,
     refresh_event_more,
     refresh_once,
     state as crown_state,
 )
 
 HOST = "127.0.0.1"
-PORT = 8887
+PORT = 9223
 # The upstream list call usually completes in about one second. A four-second
 # cadence keeps the feed materially fresher while leaving headroom for Crown's
 # rate limits, connection jitter, and slower responses.
@@ -122,6 +123,7 @@ def _compact_crown_event(event):
 
 
 def _snapshot_crown(compact=False):
+    details_enabled = extra_markets_enabled()
     with crown_runtime_lock:
         snapshot = {
             "events": list(crown_state.get("events") or []),
@@ -131,6 +133,7 @@ def _snapshot_crown(compact=False):
             "error": crown_state.get("error"),
             "cached": bool(crown_state.get("cached")),
             "source": crown_state.get("source"),
+            "extra_markets_enabled": details_enabled,
             "diagnostics": dict(crown_state.get("diagnostics") or {}),
         }
     if compact:
@@ -274,7 +277,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 self._send_json({"error": "附加盘加载失败"}, status=500)
                 return
-            status = 200 if result.get("status") == "loaded" else 202 if result.get("status") == "loading" else 502
+            status = 200 if result.get("status") in {"loaded", "disabled"} else 202 if result.get("status") == "loading" else 502
             self._send_json(result, status=status)
             return
         if path == "/api/crown/accounts":

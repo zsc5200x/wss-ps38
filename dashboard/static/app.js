@@ -1,9 +1,10 @@
 import { POLL_INTERVAL } from "./modules/constants.js";
-import { bindHistoryEvents } from "./modules/history-bindings.js";
 import { bindMergeEvents } from "./modules/merge/bindings.js";
 import { refreshMerge } from "./modules/merge/page.js";
 import { bindMetadataEvents } from "./modules/metadata-bindings.js";
 import { fetchMetadataStatus } from "./modules/metadata.js";
+import { bindMyEventsEvents } from "./modules/my-events/bindings.js";
+import { pollMyEventsEvents } from "./modules/my-events/page.js";
 import { bindPinnacleEvents } from "./modules/pinnacle/bindings.js";
 import { refresh } from "./modules/pinnacle/snapshot.js";
 import { bindRouterEvents } from "./modules/router-bindings.js";
@@ -14,9 +15,9 @@ import { resolvePage } from "./modules/shared/routes.js";
 import { state } from "./modules/state.js";
 
 bindPinnacleEvents();
-bindHistoryEvents();
 bindSettingsEvents();
 bindMergeEvents();
+bindMyEventsEvents();
 bindRouterEvents();
 bindMetadataEvents();
 
@@ -40,3 +41,8 @@ window.setInterval(() => {
     if (state.currentPage === "merge") refreshMerge();
   }
 }, POLL_INTERVAL);
+window.setInterval(() => {
+  if (!document.hidden && state.currentPage === "my-events") {
+    pollMyEventsEvents();
+  }
+}, 1000);

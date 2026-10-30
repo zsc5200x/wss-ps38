@@ -63,13 +63,36 @@ class CapturePresenceTests(unittest.TestCase):
                                     {
                                         "0": [
                                             [
-                                                [-0.25, 0.25, "0-0.5"],
+                                                [0.25, -0.25, "0-0.5"],
                                                 [0, 0, "0.0"],
-                                                [-0.75, 0.75, "0.5-1"],
+                                                [0.75, -0.75, "0.5-1"],
                                             ],
                                             [
                                                 ["3.5", 3.5, "1.660"],
                                                 ["3.0", 3, "0.787"],
+                                            ],
+                                            ["", "", None],
+                                        ]
+                                    },
+                                ],
+                                [
+                                    200,
+                                    "Underdog",
+                                    "Favourite",
+                                    0,
+                                    1793143800000,
+                                    None,
+                                    None,
+                                    None,
+                                    {
+                                        "0": [
+                                            [
+                                                [-0.5, 0.5, "0.5"],
+                                                [0, 0, "0.0"],
+                                            ],
+                                            [
+                                                ["2.5", 2.5, "1.020"],
+                                                ["2.5", 2.5, "0.729"],
                                             ],
                                             ["", "", None],
                                         ]
@@ -109,6 +132,8 @@ fn().then((result) => process.stdout.write(JSON.stringify(result)));
         self.assertEqual(details["sportId"], "29")
         self.assertEqual(details["leagueId"], "1")
 
+        # The compact feed writes the giving side as positive (home -0.25
+        # arrives as +0.25); the dashboard row keys use the signed handicap.
         self.assertEqual(
             set(result["rowKeysByEvent"]["100"]),
             {
@@ -122,6 +147,22 @@ fn().then((result) => process.stdout.write(JSON.stringify(result)));
                 "0|3|4|3.5",
                 "0|3|3|3",
                 "0|3|4|3",
+                "0|1|0|",
+                "0|1|1|",
+                "0|1|2|",
+            },
+        )
+        # A home underdog receives goals: the compact pair is negative and the
+        # stored home row must be the positive counterpart.
+        self.assertEqual(
+            set(result["rowKeysByEvent"]["200"]),
+            {
+                "0|2|0|0.5",
+                "0|2|1|-0.5",
+                "0|2|0|0",
+                "0|2|1|0",
+                "0|3|3|2.5",
+                "0|3|4|2.5",
                 "0|1|0|",
                 "0|1|1|",
                 "0|1|2|",

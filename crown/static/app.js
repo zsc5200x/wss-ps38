@@ -1,4 +1,6 @@
 import { createConfirmedMarkets } from "./modules/confirmed-markets.js";
+import { createOpportunities } from "./modules/opportunities.js";
+import { crownPinnacleChange } from "./modules/pinnacle-format.js";
 
 function installSourceRouter(){
   if(window.__sourceRouterInstalled)return;
@@ -54,7 +56,8 @@ const crownFixtures=crownQuery.get("fixtures")==="1";
 if(crownFixtures){
   crown$("eventsTitle").textContent="实时数据流";
   const eyebrow=crown$("eventsTitle").closest(".panel-title-row")?.querySelector(".eyebrow");
-  if(eyebrow)eyebrow.textContent="实时数据流";
+  // Keep the English kicker so it does not repeat the Chinese panel title.
+  if(eyebrow)eyebrow.textContent="LIVE FEED";
   crown$("crownSubStatus").textContent="正在读取实时数据流…";
   crown$("crownSourceLabel").textContent="实时数据流";
   const loadingTitle=crown$("crownEvents").querySelector(".event-list-empty strong");
@@ -117,8 +120,23 @@ function crownFormatMatchPhase(minute,fallback){
   return labels[rawMinute.toUpperCase()]||rawMinute||fallback||"开赛时间未知";
 }
 function crownNormalizeLine(value){return String(value??"").trim().replace(/\s+/g,"").replace(/[–—−]/g,"-");}
+/** Crown quarter-goal notation: 0.25 -> 0/0.5, 0.75 -> 0.5/1, -0.25 -> -0/0.5. */
+function crownQuarterLine(text){
+  if(!text||text.includes("/"))return text;
+  const number=Number(text);
+  if(!Number.isFinite(number)||Math.abs(number)<0.000001)return text;
+  const magnitude=Math.abs(number);
+  const steps=Math.round(magnitude*4);
+  const sign=number<0?"-":"";
+  if(Math.abs(magnitude*4-steps)<0.000001&&steps%2===1){
+    const low=Number((magnitude-0.25).toFixed(2));
+    const high=Number((magnitude+0.25).toFixed(2));
+    return `${sign}${low}/${high}`;
+  }
+  return `${sign}${Number(magnitude.toFixed(2))}`;
+}
 function crownHandicapLine(line,side){
-  const text=crownNormalizeLine(line);if(!text)return "盘口未知";
+  const text=crownQuarterLine(crownNormalizeLine(line));if(!text)return "盘口未知";
   if(text==="0"||text==="0.0")return "0";
   if(text.startsWith("-"))return side==="home"?text:`+${text.slice(1)}`;
   if(text.startsWith("+"))return side==="home"?text:`-${text.slice(1)}`;
@@ -187,6 +205,7 @@ function crownQuoteCount(event){
   return crownMarketItems(event,"handicap").length+crownMarketItems(event,"total").length+(crownMoneylineValues(event).length>=3?1:0);
 }
 function crownMarketStatusText(event,kind,count){
+  if(crownLatestState.extra_markets_enabled===false)return `${count} 组盘口 · 附加盘采集已关闭`;
   const extra=event&&event.extra_markets;
   if(extra&&extra.status==="loaded"){
     const baseCount=event&&event.markets&&Array.isArray(event.markets[kind])?event.markets[kind].length:0;
@@ -203,6 +222,42 @@ function crownGroupLabel(event){
   return event.start_label||"开赛时间未知";
 }
 function crownMarketId(item){return item&&(item.gidm||item.market_id||item.gid||item.hgid)||"";}
+function crownQuoteStaleNote(capturedAt){
+  if(!capturedAt)return "";
+  const time=new Date(String(capturedAt).replace(" ","T")).getTime();
+  if(!Number.isFinite(time)||Date.now()-time<5*60*1000)return "";
+  return `采集 ${crownTimeLabel(capturedAt)}`;
+}
+// Same semantics as the Pinnacle data panel: green for a rise, red for a
+// drop, "新盘" for a newly created row, nothing while the row is flat.
+function crownQuoteChange(quote){
+  const change=crownPinnacleChange(quote);
+  if(!change)return "";
+  return `<span class="paired-change ${change.direction}">${crownEsc(change.text)}</span>`;
+}
+function crownPairedPrice(price,market,option,line,confirmed){
+  const crownPrice=price==null||String(price)===""?"—":price;
+  if(!crownFixtures||!confirmed)return crownEsc(crownPrice);
+  const quote=crownConfirmed.quote(confirmed,market,option,line);
+  const pinnaclePrice=quote?.price??"—";
+  const alternate=quote?.alternate||null;
+  const quoteTitle=quote?.quoted
+    ?quote.capturedAt?`平博赔率最后采集时间：${quote.capturedAt}`:"平博报价采集时间未知"
+    :quote?.reason==="no_matching_line"?"平博当前没有相同盘口线的报价记录":"平博该选项当前无报价";
+  // No same line: show the closest Pinnacle line and its water instead of a
+  // bare dash, labelled with Crown's split quarter notation.
+  const alternateNote=!quote?.quoted&&alternate&&alternate.price!=="—"
+    ?`<small class="paired-line-note">平博 ${crownEsc(alternate.line)} ${crownEsc(alternate.price)}</small>`
+    :"";
+  const quoteNote=quote&&!quote.quoted
+    ?(alternateNote||`<small class="paired-line-note">${quote.reason==="no_matching_line"?"暂无同盘口":"该项无报价"}</small>`)
+    :"";
+  const staleNote=quote?.quoted?crownQuoteStaleNote(quote.capturedAt):"";
+  const staleHtml=staleNote?`<small class="paired-line-note">${crownEsc(staleNote)}</small>`:"";
+  const lineNote=quote?.lineDiff?`<small class="paired-line-note">平博盘 ${crownEsc(quote.line)}</small>`:"";
+  const changeHtml=crownQuoteChange(quote);
+  return `<span class="paired-odds"><span class="crown-odds">皇冠 ${crownEsc(crownPrice)}</span><span class="pinnacle-odds" title="${crownEsc(quoteTitle)}">平博 ${crownEsc(pinnaclePrice)}</span>${changeHtml}${quoteNote}${lineNote}${staleHtml}</span>`;
+}
 function crownFilterEvents(events,query,filter){
   return events.filter(event=>{
     if(crownFinished(event))return false;
@@ -232,26 +287,35 @@ function crownEventGroup(key,title,items){
   const leagueHtml=[...leagues.entries()].map(([name,events])=>`<div class="league-label"><strong>${crownEsc(name)}</strong><span>${events.length} 场</span></div>${events.map(crownEventItem).join("")}`).join("");
   return `<section class="event-group ${key}${collapsed?" collapsed":""}"><button class="event-group-head" type="button" data-group-toggle="${key}" aria-expanded="${!collapsed}"><span class="event-group-title">${title}</span><span class="event-group-count">${items.length} 场</span><span class="event-group-toggle" aria-hidden="true">⌄</span></button><div class="league-list">${leagueHtml}</div></section>`;
 }
-function crownMarketBook(title,items,kind,event){
+function crownMarketBook(title,items,kind,event,confirmed){
   const list=Array.isArray(items)?items:[];
   const statusText=crownMarketStatusText(event,kind,list.length);
   if(!list.length)return `<article class="market-book"><header class="market-book-head"><h3>${title}</h3><small>${crownEsc(statusText)}</small></header><div class="market-empty">当前没有有效盘口</div></article>`;
   const rows=list.map(item=>{
     const line=item.raw_line||item.line||"盘口未知";
     const pair=kind==="handicap"
-      ? [[`${event.home||"主队"} ${crownHandicapLine(line,"home")}`,item.a],[`${event.away||"客队"} ${crownHandicapLine(line,"away")}`,item.b]]
-      : [[`大 ${crownNormalizeLine(line)}`,item.a],[`小 ${crownNormalizeLine(line)}`,item.b]];
+      ? [[`${event.home||"主队"} ${crownHandicapLine(line,"home")}`,item.a,"0",crownHandicapLine(line,"home")],[`${event.away||"客队"} ${crownHandicapLine(line,"away")}`,item.b,"1",crownHandicapLine(line,"away")]]
+      : [[`大 ${crownNormalizeLine(line)}`,item.a,"3",line],[`小 ${crownNormalizeLine(line)}`,item.b,"4",line]];
     const marketId=crownMarketId(item);
-    return `<div class="market-line">${pair.map(([label,price])=>`<div class="selection"><span>${crownEsc(label)}</span><strong>${crownEsc(price||"—")}</strong></div>`).join("")}</div>${marketId?`<div class="market-note">${item.master==="Y"||!item.gidm?"主盘":"附加盘"} · CROWN ${crownEsc(marketId)}</div>`:""}`;
+    return `<div class="market-line">${pair.map(([label,price,option,quoteLine])=>`<div class="selection"><span>${crownEsc(label)}</span><strong class="${crownFixtures&&confirmed?"paired-odds-value":""}">${crownPairedPrice(price,kind==="handicap"?"2":"3",option,quoteLine,confirmed)}</strong></div>`).join("")}</div>${marketId?`<div class="market-note">${item.master==="Y"||!item.gidm?"主盘":"附加盘"} · CROWN ${crownEsc(marketId)}</div>`:""}`;
   }).join("");
   return `<article class="market-book"><header class="market-book-head"><h3>${title}</h3><small>${crownEsc(statusText)}</small></header>${rows}</article>`;
 }
-function crownMoneyline(event){
+function crownMoneyline(event,confirmed){
   const values=crownMoneylineValues(event);
   const statusText=crownMarketStatusText(event,"moneyline",values.length>=3?1:0);
   if(values.length<3)return `<article class="market-book moneyline"><header class="market-book-head"><h3>全场胜平负</h3><small>${crownEsc(statusText)}</small></header><div class="market-empty">当前没有有效报价</div></article>`;
   const labels=[event.home||"主队","和局",event.away||"客队"];
-  return `<article class="market-book moneyline"><header class="market-book-head"><h3>全场胜平负</h3><small>${crownEsc(statusText)}</small></header><div class="moneyline-grid">${labels.map((label,index)=>`<div class="moneyline-cell"><span>${crownEsc(label)}</span><strong>${crownEsc(values[index]||"—")}</strong></div>`).join("")}</div></article>`;
+  // Crown returns home/draw/away; Pinnacle numbers 0=home, 1=away, 2=draw.
+  const pinnacleOptions=["0","2","1"];
+  return `<article class="market-book moneyline"><header class="market-book-head"><h3>全场胜平负</h3><small>${crownEsc(statusText)}</small></header><div class="moneyline-grid">${labels.map((label,index)=>`<div class="moneyline-cell"><span>${crownEsc(label)}</span><strong class="${crownFixtures&&confirmed?"paired-odds-value":""}">${crownPairedPrice(values[index]??"—","1",pinnacleOptions[index],"",confirmed)}</strong></div>`).join("")}</div></article>`;
+}
+function crownTeamBlock(crownName,pinnacleName,side){
+  const name=String(crownName||"").trim()||"未知球队";
+  // Always show the Pinnacle spelling for both sides so the confirmed pairing
+  // can be checked even when the two feeds use the same display name.
+  const alias=String(pinnacleName||"").trim();
+  return `<div class="match-team${side==="away"?" away":""}"><span class="match-team-name">${crownEsc(name)}</span>${alias?`<small class="match-team-alias">（平博 ${crownEsc(alias)}）</small>`:""}</div>`;
 }
 function crownEventDetail(event){
   if(!event)return `<div class="detail-empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M4 5h16v14H4z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg><strong>等待皇冠赛事数据</strong><p>打开皇冠登录并完成会话验证后，赛事和盘口会自动显示在这里。</p><button class="button primary" type="button" data-open-login>连接皇冠会话</button></div>`;
@@ -264,11 +328,19 @@ function crownEventDetail(event){
   const detail=crownFormatMatchPhase(event.minute,event.start_label);
   const pinnacle=confirmed&&(confirmed.pinnacle||confirmed.pinnacleEvent);
   const pinnacleId=String(pinnacle?.id||confirmed?.pinnacleId||"");
-  const eventIdMeta=crownFixtures
-    ? `<span class="meta-pill event-id-pill">皇冠比赛 ID ${crownEsc(event.id||"—")}</span><span class="meta-pill event-id-pill">平博比赛 ID ${crownEsc(pinnacleId||"待匹配")}</span>`
-    : `<span class="meta-pill">皇冠 ID ${crownEsc(event.id||"—")}</span>`;
+  const crownLeagueId=String(event.leagueId||event.league_id||"");
+  const pinnacleLeagueId=String(pinnacle?.leagueId||"");
+  const leagueIdPills=[
+    crownLeagueId?`<span class="league-id-pill crown">皇冠联赛 ID ${crownEsc(crownLeagueId)}</span>`:"",
+    pinnacleLeagueId?`<span class="league-id-pill pinnacle"${pinnacle?.league?` title="${crownEsc(pinnacle.league)}"`:""}>平博联赛 ID ${crownEsc(pinnacleLeagueId)}</span>`:"",
+  ].filter(Boolean).join("");
+  const matchIdPills=[
+    confirmed?'<span class="confirmed-chip">已确认关联</span>':"",
+    `<span class="match-id-pill">皇冠比赛 ID ${crownEsc(event.id||"—")}</span>`,
+    crownFixtures?`<span class="match-id-pill pinnacle">平博比赛 ID ${crownEsc(pinnacleId||"待匹配")}</span>`:"",
+  ].filter(Boolean).join("");
   const crownHeader=crownFixtures?"":`<div class="markets-provider-title crown-provider-title"><div><strong>皇冠盘口</strong><span>${crownEsc(event.odds_format_label||"皇冠港赔（HK）")}</span></div><small>皇冠 ID ${crownEsc(event.id||"—")}</small></div>`;
-  return `<article class="event-hero"><div class="event-hero-top"><div class="event-league"><span>${crownEsc(event.league||"未命名联赛")}</span></div><div class="event-hero-meta"><span class="meta-pill ${crownLive(event)?"live":""}">${crownLive(event)?"滚球":"今日待开"}</span><span class="meta-pill">${crownEsc(event.start_label||"时间未知")}</span>${eventIdMeta}</div></div><div class="match-hero"><div class="match-team">${crownEsc(event.home||"主队")}</div><div class="match-score"><strong>${crownEsc(score)}</strong><span>${crownEsc(detail)}</span></div><div class="match-team away">${crownEsc(event.away||"客队")}</div></div></article><div class="detail-summary-row"><div><span>皇冠报价组数</span><strong>${crownQuoteCount(event)} 组</strong></div><div><span>盘口格式</span><strong>${crownEsc(event.odds_format_label||"皇冠港赔（HK）")}</strong></div><div><span>数据来源</span><strong>${confirmed?"皇冠 + 平博":"当前项目"}</strong></div></div>${crownConfirmed.renderSummary(confirmed,event)}<div class="markets-layout">${crownHeader}${crownMoneyline(event)}${crownMarketBook("让球",handicapItems,"handicap",event)}${crownMarketBook("大小球",totalItems,"total",event)}${crownConfirmed.renderMarkets(confirmed,event)}</div>`;
+  return `<article class="event-hero"><div class="match-league"><div class="match-league-head"><strong class="match-league-name">${crownEsc(event.league||"未命名联赛")}</strong><span class="match-state${crownLive(event)?" live":""}">${crownLive(event)?"滚球":"今日待开"}</span></div>${leagueIdPills?`<div class="match-league-ids">${leagueIdPills}</div>`:""}</div><div class="match-hero">${crownTeamBlock(event.home||"主队",pinnacle?.home,"home")}<div class="match-score"><strong>${crownEsc(score)}</strong><span>${crownEsc(detail)}</span></div>${crownTeamBlock(event.away||"客队",pinnacle?.away,"away")}</div><div class="match-ids">${matchIdPills}</div></article><div class="detail-summary-row"><div><span>皇冠报价组数</span><strong>${crownQuoteCount(event)} 组</strong></div><div><span>盘口格式</span><strong>${crownEsc(event.odds_format_label||"皇冠港赔（HK）")}</strong></div><div><span>数据来源</span><strong>${confirmed?"皇冠 + 平博":"当前项目"}</strong></div></div><div class="markets-layout">${crownHeader}${crownMoneyline(event,confirmed)}${crownMarketBook("让球",handicapItems,"handicap",event,confirmed)}${crownMarketBook("大小球",totalItems,"total",event,confirmed)}</div>`;
 }
 function crownRender(state){
   crownLatestState=state;
@@ -318,6 +390,7 @@ function crownRender(state){
   crown$("crownEventDetail").innerHTML=crownEventDetail(selected);
 }
 async function crownLoadExtra(event){
+  if(crownLatestState.extra_markets_enabled===false)return;
   const gid=String(event&&event.id||"");
   const status=String(event&&event.extra_markets&&event.extra_markets.status||"");
   if(!gid||status==="loaded"||crownExtraLoading.has(gid))return;
@@ -507,5 +580,16 @@ if(crownEmbedded){
   crownPostEmbeddedState();
 }
 if(new URLSearchParams(window.location.search).get("openSettings")==="1")settingsOpen();
+const crownOpportunities = crownFixtures ? createOpportunities({
+  enabled: true,
+  escapeHtml: crownEsc,
+  onSelect: crownId => {
+    if(!crownId)return;
+    crownSelectedId=crownId;
+    crownRenderedSignature="";
+    crownRender(crownLatestState);
+  },
+}) : null;
 crownUpdate();
 setInterval(()=>{if(!crownRefreshPaused)crownUpdate();},1000);
+if(crownOpportunities)crownOpportunities.start();

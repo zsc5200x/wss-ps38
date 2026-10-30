@@ -92,6 +92,47 @@ class EventFilterTests(unittest.TestCase):
         self.assertEqual(crown_runtime.state["events"][0]["extra_markets"]["handicap"][0]["line"], "0.25")
         self.assertEqual(crown_runtime.state["events"][1]["extra_markets"], {"status": "loaded"})
 
+    def test_disabled_extra_markets_skip_on_demand_and_background_fetches(self):
+        class RecordingClient:
+            def __init__(self):
+                self.calls = 0
+
+            def game_more(self, game, mode):
+                self.calls += 1
+                return {"games": []}
+
+        client = RecordingClient()
+        config = {"crown_extra_markets_enabled": False}
+        with patch("crown_runtime.load_config", return_value=config), \
+                patch("crown_runtime._load_more_markets") as load_more:
+            selected = crown_runtime.refresh_event_more("missing")
+            scheduled = crown_runtime._start_more_markets_refresh(
+                client, [({"GID": "123"}, "live")], "CROWN_HK"
+            )
+
+        self.assertEqual(selected["status"], "disabled")
+        self.assertFalse(scheduled)
+        load_more.assert_not_called()
+        self.assertEqual(client.calls, 0)
+
+    def test_queued_extra_market_job_rechecks_switch_before_upstream_request(self):
+        class RecordingClient:
+            def __init__(self):
+                self.calls = 0
+
+            def game_more(self, game, mode):
+                self.calls += 1
+                return {"games": []}
+
+        client = RecordingClient()
+        with patch("crown_runtime.load_config", return_value={"crown_extra_markets_enabled": False}):
+            result = crown_runtime._cached_more_markets(
+                client, {"GID": "123"}, "live", "CROWN_HK"
+            )
+
+        self.assertEqual(result["status"], "disabled")
+        self.assertEqual(client.calls, 0)
+
     def test_transient_detail_failure_keeps_last_good_alternate_lines(self):
         previous_cache = dict(crown_runtime._more_cache)
         self.addCleanup(

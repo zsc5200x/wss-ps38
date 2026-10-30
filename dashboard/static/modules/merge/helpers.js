@@ -21,6 +21,18 @@ export function mergeEventTime(event, source) {
   return String(raw || "时间未知");
 }
 
+export function mergeEventTimeLabel(event, source) {
+  const normalized = String(event?.normalizedKickoff || "").trim();
+  return normalized ? `北京时间 ${normalized}` : mergeEventTime(event, source);
+}
+
+export function mergeSourceTimezoneLabel(event, source) {
+  const zone = String(event?.sourceTimezone || "").trim();
+  if (zone === "Asia/Shanghai") return "北京";
+  if (zone === "America/New_York") return "美东";
+  return zone || (source === "crown" ? "美东" : "北京");
+}
+
 export function mergeEventRawTime(event, source) {
   const raw = source === "crown" ? event?.startLabel : event?.kickoff;
   return String(raw || "").trim();

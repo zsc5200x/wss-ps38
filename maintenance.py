@@ -51,10 +51,18 @@ def unique_path(path: Path) -> Path:
         index += 1
 
 
-def verify_database(path: Path) -> str:
-    uri = f"file:{path.resolve().as_posix()}?mode=ro&immutable=1"
+def verify_database(
+    path: Path, *, immutable: bool = True, quick: bool = False
+) -> str:
+    # immutable=1 skips WAL reads and is only safe for closed/offline files
+    # (for example, a just-created backup). A live dashboard database can have
+    # uncheckpointed pages in -wal; checking it with immutable=1 reports false
+    # "invalid page number" errors. Use a read-only WAL-aware connection there.
+    query = "mode=ro&immutable=1" if immutable else "mode=ro"
+    uri = f"file:{path.resolve().as_posix()}?{query}"
+    pragma = "PRAGMA quick_check" if quick else "PRAGMA integrity_check"
     with closing(sqlite3.connect(uri, uri=True, timeout=30)) as connection:
-        row = connection.execute("PRAGMA integrity_check").fetchone()
+        row = connection.execute(pragma).fetchone()
     result = str(row[0]) if row else "no result"
     if result != "ok":
         raise RuntimeError(f"数据库完整性检查失败：{path}: {result}")

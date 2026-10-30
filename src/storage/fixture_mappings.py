@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json
 import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -14,12 +15,28 @@ class FixtureMergeStore:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # The mapping tables are tiny and read on every merge refresh; cache the
+        # parsed rows and invalidate on any store write instead of re-reading
+        # and JSON-decoding both tables several times per request.
+        self._cache_lock = threading.Lock()
+        self._cache: dict[str, list[dict[str, Any]]] = {}
+        self._cache_generation = 0
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(str(self.path), timeout=10)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA busy_timeout = 5000")
+        # WAL already allows concurrent readers with one writer; NORMAL drops
+        # the extra fsync per commit while keeping WAL crash safety.
+        connection.execute("PRAGMA synchronous = NORMAL")
+        connection.execute("PRAGMA temp_store = MEMORY")
+        connection.execute("PRAGMA cache_size = -16000")
+        try:
+            connection.execute("PRAGMA mmap_size = 67108864")
+        except sqlite3.DatabaseError:
+            pass
         return connection
 
     @contextmanager
@@ -37,6 +54,7 @@ class FixtureMergeStore:
     def _initialize(self) -> None:
         with self._connection() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
+            connection.execute("PRAGMA wal_autocheckpoint = 1000")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS fixture_mappings (
@@ -61,6 +79,27 @@ class FixtureMergeStore:
                 )
                 """
             )
+            connection.execute("PRAGMA optimize")
+        with self._cache_lock:
+            self._cache_generation += 1
+            self._cache.clear()
+
+    def _invalidate(self) -> None:
+        with self._cache_lock:
+            self._cache_generation += 1
+            self._cache.clear()
+
+    def _cached_list(self, key: str, loader) -> list[dict[str, Any]]:
+        with self._cache_lock:
+            cached = self._cache.get(key)
+            if cached is not None:
+                return cached
+            generation = self._cache_generation
+        value = loader()
+        with self._cache_lock:
+            if self._cache_generation == generation:
+                self._cache[key] = value
+        return value
 
     def close(self) -> None:
         """Keep the same lifecycle API as the other stores; connections are per-operation."""
@@ -71,6 +110,9 @@ class FixtureMergeStore:
         return datetime.now().astimezone().isoformat(timespec="seconds")
 
     def list_mappings(self) -> list[dict[str, Any]]:
+        return self._cached_list("fixtures", self._load_mappings)
+
+    def _load_mappings(self) -> list[dict[str, Any]]:
         with self._connection() as connection:
             rows = connection.execute(
                 """
@@ -93,6 +135,9 @@ class FixtureMergeStore:
         ]
 
     def list_league_mappings(self) -> list[dict[str, Any]]:
+        return self._cached_list("leagues", self._load_league_mappings)
+
+    def _load_league_mappings(self) -> list[dict[str, Any]]:
         with self._connection() as connection:
             rows = connection.execute(
                 """
@@ -190,6 +235,7 @@ class FixtureMergeStore:
                     now,
                 ),
             )
+        self._invalidate()
         return {"pinnacleId": pinnacle_id, "crownId": crown_id, "updatedAt": now}
 
     def unmap_league(self, crown_league_id: str) -> bool:
@@ -209,6 +255,7 @@ class FixtureMergeStore:
             cursor = connection.execute(
                 "DELETE FROM league_mappings WHERE crown_league_id = ?", (key,)
             )
+        self._invalidate()
         return cursor.rowcount > 0
 
     def map_events(
@@ -264,6 +311,7 @@ class FixtureMergeStore:
                     now,
                 ),
             )
+        self._invalidate()
         return {
             "pinnacleId": pinnacle_id,
             "crownId": crown_id,
@@ -278,4 +326,5 @@ class FixtureMergeStore:
             cursor = connection.execute(
                 "DELETE FROM fixture_mappings WHERE pinnacle_event_id = ?", (key,)
             )
+        self._invalidate()
         return cursor.rowcount > 0

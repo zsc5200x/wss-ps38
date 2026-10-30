@@ -90,6 +90,14 @@ _last_snapshot_monotonic = None
 _more_refresh_thread = None
 
 
+def extra_markets_enabled():
+    """Read the shared collection switch at request time; fail closed on bad config."""
+    try:
+        return load_config().get("crown_extra_markets_enabled", True) is True
+    except Exception:
+        return False
+
+
 def _configure_browser():
     os.environ["CROWN_CDP_URL"] = str(load_config()["crown_cdp_url"])
     # Use the user's installed browser when Playwright's bundled Chromium is
@@ -341,14 +349,15 @@ def _more_ids(row):
     }
 
 
-def _normalize_more_markets(rows, raw_format, mode="today"):
+def _normalize_more_markets(rows, raw_format, mode="today", strong=""):
     """Normalize every non-zero full-time line returned by ``game_more``.
 
     Crown uses a compact field catalogue rather than one XML node per market.
     The ``RATIO`` fields identify lines and the matching ``IOR`` fields carry
     the two water values. We preserve the row IDs so the UI can show all
     available alternate lines without pretending that a shared ``GIDM`` is
-    unique to one selection.
+    unique to one selection. ``strong`` is the owning game's giving side so
+    alternate handicap lines keep the same direction as the main line.
     """
     result = {"handicap": [], "total": [], "moneyline": [], "rows": []}
     live = str(mode or "").lower() == "live"
@@ -385,6 +394,8 @@ def _normalize_more_markets(rows, raw_format, mode="today"):
             line = _format_line(raw_line)
             if not line:
                 continue
+            if kind == "handicap" and strong:
+                line = _orient_handicap_text(line, strong=strong)
             pair = _more_pair(row, left_key, right_key, raw_format)
             if not pair:
                 continue
@@ -398,7 +409,7 @@ def _normalize_more_markets(rows, raw_format, mode="today"):
                 "market_type": kind,
                 "market_key": market_key,
                 "line": line,
-                "raw_line": str(raw_line),
+                "raw_line": line if kind == "handicap" and strong else str(raw_line),
                 "line_source": f"RATIO_{token}" if token else "RATIO",
                 "odds_source": {"a": left_key, "b": right_key},
                 "odds_format": raw_format,
@@ -411,7 +422,15 @@ def _normalize_more_markets(rows, raw_format, mode="today"):
 
         moneyline = _moneyline_fields(row, live=live)
         if any(moneyline.values()):
-            result["moneyline"].append({**ids, **moneyline, "market_type": "moneyline", "odds_format": raw_format})
+            values = _moneyline_values(moneyline)
+            result["moneyline"].append({
+                **ids,
+                "home": values[0],
+                "draw": values[1],
+                "away": values[2],
+                "market_type": "moneyline",
+                "odds_format": raw_format,
+            })
     return result
 
 
@@ -422,9 +441,13 @@ def _more_detail_lock(gid):
 
 def _cached_more_markets(client, game, mode, raw_format):
     gid = str(game.get("GID") or game.get("ID") or "")
+    if not extra_markets_enabled():
+        return {"status": "disabled", "handicap": [], "total": [], "moneyline": [], "rows": []}
     if not gid or not callable(getattr(client, "game_more", None)):
         return {"status": "not_requested", "handicap": [], "total": [], "moneyline": [], "rows": []}
     with _more_detail_lock(gid):
+        if not extra_markets_enabled():
+            return {"status": "disabled", "handicap": [], "total": [], "moneyline": [], "rows": []}
         now = time.monotonic()
         ttl = _MORE_LIVE_CACHE_TTL if mode == "live" else _MORE_CACHE_TTL
         cache_key = (gid, mode, raw_format)
@@ -432,9 +455,16 @@ def _cached_more_markets(client, game, mode, raw_format):
             cached = _more_cache.get(cache_key)
             if cached and now - cached["created_at"] < ttl:
                 return cached["value"]
+        if not extra_markets_enabled():
+            return {"status": "disabled", "handicap": [], "total": [], "moneyline": [], "rows": []}
         try:
             payload = client.game_more(game, mode)
-            value = _normalize_more_markets(payload.get("games", []), raw_format, mode=mode)
+            value = _normalize_more_markets(
+                payload.get("games", []),
+                raw_format,
+                mode=mode,
+                strong=str(game.get("STRONG") or game.get("HSTRONG") or ""),
+            )
             value["status"] = "loaded"
         except Exception:
             # A transient game_more failure must not erase alternate lines that
@@ -494,6 +524,8 @@ def _publish_event_more_markets(gid, more_markets):
 def refresh_event_more(gid):
     """Load alternate lines for one selected fixture without overloading Crown."""
     gid = str(gid or "").strip()
+    if not extra_markets_enabled():
+        return {"status": "disabled", "gid": gid, "counts": {"handicap": 0, "total": 0, "moneyline": 0}}
     with _more_sources_lock:
         source = (_more_sources.get("games") or {}).get(gid)
         client = _more_sources.get("client")
@@ -643,7 +675,7 @@ def _select_more_refresh_batch(expired, raw_format=None):
 
 def _start_more_markets_refresh(client, games, raw_format):
     global _more_refresh_thread
-    if not games or not callable(getattr(client, "game_more", None)):
+    if not extra_markets_enabled() or not games or not callable(getattr(client, "game_more", None)):
         return False
     now = time.monotonic()
     expired = [
@@ -758,11 +790,12 @@ def _refresh_once_locked():
             (item, mode) for item, mode in source_games
             if not is_excluded_league(item.get("LEAGUE"))
         ]
-        _register_more_sources(client, source_games, raw_format)
+        details_enabled = extra_markets_enabled()
+        _register_more_sources(client if details_enabled else None, source_games if details_enabled else [], raw_format)
         more_by_gid = {
             str(item.get("GID") or item.get("ID") or ""): cached
             for item, mode in source_games
-            if (cached := _cached_more_snapshot(item, mode, raw_format)) is not None
+            if details_enabled and (cached := _cached_more_snapshot(item, mode, raw_format)) is not None
         }
         events = [
             _normalize_event(
@@ -801,7 +834,8 @@ def _refresh_once_locked():
                 "diagnostics": diagnostics,
             })
         _persist_event_cache(events, timestamp)
-        _start_more_markets_refresh(client, source_games, raw_format)
+        if details_enabled:
+            _start_more_markets_refresh(client, source_games, raw_format)
         return {"ok": True, "events": events, "leagues": leagues}
     except Exception as exc:
         reason = _safe_reason(exc)
@@ -859,6 +893,61 @@ def _moneyline_fields(row, *, live=False):
     }
 
 
+def _moneyline_values(fields):
+    """Return Crown's 1X2 prices as Hong Kong water.
+
+    Crown quotes three-way prices in decimal (EU) even when the member account
+    displays HK water for handicap/total. Convert to HK so the merged homepage
+    compares like for like; values that are already water (<= 1) are kept.
+    """
+    values = []
+    for name in ("home", "draw", "away"):
+        raw = fields.get(name) or ""
+        converted = to_hk_water(raw, "EU") if raw else None
+        values.append(_format_hk(converted) if converted is not None else _price(raw))
+    return values
+
+
+def _orient_handicap_text(raw, *, strong="", moneyline_fields=None):
+    """Prefix a handicap magnitude with the giving side's sign.
+
+    Crown's ``RATIO_*`` fields carry only the magnitude; ``STRONG`` names the
+    side that gives goals (H = home, C = away). The dashboard and Pinnacle rows
+    use the signed convention (giving is negative, receiving positive), so the
+    line must be oriented here instead of assuming the home team always gives.
+    Without ``STRONG`` the lower three-way price identifies the favourite.
+    """
+    text = str(raw or "").strip()
+    magnitude = normalize_line(text)
+    if magnitude is None or magnitude == 0:
+        return text
+    strong = str(strong or "").strip().upper()
+    home_gives = None
+    if strong in {"H", "C"}:
+        home_gives = strong == "H"
+    elif moneyline_fields:
+        try:
+            home_price = float(moneyline_fields.get("home") or 0)
+            away_price = float(moneyline_fields.get("away") or 0)
+        except (TypeError, ValueError):
+            home_price = away_price = 0.0
+        if home_price > 1 and away_price > 1 and home_price != away_price:
+            home_gives = home_price < away_price
+    if home_gives is None:
+        return text
+    return ("-" if home_gives else "+") + text.lstrip("+-")
+
+
+def _signed_handicap_line(game, *, live, moneyline_fields):
+    """Return the home handicap with the sign used by the dashboard rows."""
+    raw = str((game.get("RATIO_RE") if live else game.get("RATIO_R")) or "").strip()
+    return _orient_handicap_text(
+        raw,
+        strong=str(game.get("STRONG") or game.get("HSTRONG") or ""),
+        moneyline_fields=moneyline_fields,
+    )
+
+
 def _market(line, left, right, raw_format="CROWN_HK"):
     raw_left, raw_right = _price(left), _price(right)
     if not raw_left and not raw_right:
@@ -881,18 +970,20 @@ def _format_hk(value):
 
 def _normalize_event(game, mode, display_format="HK", raw_format="CROWN_HK", more_markets=None):
     live = mode == "live"
+    moneyline_fields = _moneyline_fields(game, live=live)
+    handicap_line = _signed_handicap_line(
+        game, live=live, moneyline_fields=moneyline_fields
+    )
     if live:
-        handicap = _market(game.get("RATIO_RE"), game.get("IOR_REH"), game.get("IOR_REC"), raw_format)
+        handicap = _market(handicap_line, game.get("IOR_REH"), game.get("IOR_REC"), raw_format)
         # Crown's ordinary total market exposes under on IOR_*H and over on
         # IOR_*C. Keep the public pair in over/under order for display.
         total = _market(game.get("RATIO_ROUO"), game.get("IOR_ROUC"), game.get("IOR_ROUH"), raw_format)
     else:
-        handicap = _market(game.get("RATIO_R"), game.get("IOR_RH"), game.get("IOR_RC"), raw_format)
+        handicap = _market(handicap_line, game.get("IOR_RH"), game.get("IOR_RC"), raw_format)
         total = _market(game.get("RATIO_OUO"), game.get("IOR_OUC"), game.get("IOR_OUH"), raw_format)
-    # The account's verified odd_f_type is HK. Three-way prices are individual
-    # display values, unlike the paired handicap/total IOR fields.
-    moneyline_fields = _moneyline_fields(game, live=live)
-    moneyline = [moneyline_fields["home"], moneyline_fields["draw"], moneyline_fields["away"]]
+    # Crown's 1X2 feed is decimal; export HK water like the other markets.
+    moneyline = _moneyline_values(moneyline_fields)
     if not any(moneyline):
         moneyline = []
     score = " - ".join(item for item in (str(game.get("SCORE_H") or ""), str(game.get("SCORE_C") or "")) if item)
@@ -904,6 +995,8 @@ def _normalize_event(game, mode, display_format="HK", raw_format="CROWN_HK", mor
     # endpoint has the cleanest display values, while ``game_more`` exposes
     # the row/group IDs for the master line. Normalize lines so quarter-goal
     # strings such as ``1 / 1.5`` align with the more response's ``1.25``.
+    # The list line is signed while the more rows carry a magnitude, so the
+    # comparison uses absolute values.
     def attach_ids(items, extras):
         masters = [item for item in extras if isinstance(item, dict) and item.get("master") == "Y"]
         for item in items:
@@ -912,7 +1005,7 @@ def _normalize_event(game, mode, display_format="HK", raw_format="CROWN_HK", mor
             item_line = normalize_line(item.get("line"))
             for master in masters:
                 master_line = normalize_line(master.get("line"))
-                if item_line is None or master_line is None or item_line != master_line:
+                if item_line is None or master_line is None or abs(item_line) != abs(master_line):
                     continue
                 for key in ("gid", "gidm", "hgid", "market_id", "master"):
                     value = master.get(key)

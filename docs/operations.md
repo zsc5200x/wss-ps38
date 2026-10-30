@@ -180,7 +180,7 @@ rm "$HOME/Library/LaunchAgents/com.ps3838-wss.maintenance.plist"
 | GET | `/api/crown/session` | 皇冠会话运行诊断 |
 | GET | `/api/crown/events?compact=1` | 皇冠轻量赛事缓存 |
 
-历史查询可附加 `stage`、`market`、`option`、`line` 精确选择盘口；`hours` 最大 8760，`limit` 最大 10000。浏览器访问皇冠 API 时使用主看板同源代理即可，无需另开 8887。
+历史查询可附加 `stage`、`market`、`option`、`line` 精确选择盘口；`hours` 最大 8760，`limit` 最大 10000。浏览器访问皇冠 API 时使用主看板同源代理即可，无需另开 9223；需要直接调试皇冠服务时可访问 `http://127.0.0.1:9223`。
 
 ## 排障顺序
 

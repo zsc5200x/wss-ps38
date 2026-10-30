@@ -26,7 +26,7 @@ class EnsureLoginTabTests(unittest.TestCase):
             [
                 "ensure_login_tab.py",
                 "--cdp-url", "http://127.0.0.1:9222",
-                "--service-url", "http://127.0.0.1:8887",
+                "--service-url", "http://127.0.0.1:9223",
             ],
         )
         self.argv_patcher.start()

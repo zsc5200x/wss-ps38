@@ -5,6 +5,11 @@ from pathlib import Path
 from fixture_merge import (
     FixtureMergeStore,
     MappingConflict,
+    build_alias_index,
+    competition_conflict,
+    competition_profile,
+    fixture_pair_problem,
+    normalize_league,
     normalize_name,
     prepare_crown_event,
     prepare_pinnacle_event,
@@ -56,7 +61,48 @@ def crown_event(
 class CandidateRankingTests(unittest.TestCase):
     def test_normalization_handles_accents_punctuation_and_club_suffixes(self):
         self.assertEqual(normalize_name(" Atlético FC."), "atletico")
-        self.assertEqual(normalize_name("十月九足球俱乐部"), "十月九足球俱乐部")
+        self.assertEqual(normalize_name("十月九足球俱乐部"), "十月九")
+        self.assertEqual(normalize_name("山度士SP"), "山度士")
+        self.assertEqual(normalize_name("波图加沙足球俱乐部"), "波图加沙")
+
+    def test_league_normalization_handles_tier_and_translation_synonyms(self):
+        self.assertEqual(
+            normalize_league("意大利 - 甲级联赛"),
+            normalize_league("意大利甲组联赛"),
+        )
+        self.assertEqual(
+            normalize_league("美国 - 美国足球大联盟"),
+            normalize_league("美国职业大联盟"),
+        )
+        self.assertEqual(
+            normalize_league("India - I-League 3"),
+            normalize_league("印度 - I联赛3"),
+        )
+
+    def test_alias_index_boosts_confirmed_translation_to_high_confidence(self):
+        aliases = build_alias_index(
+            league_pairs=[("巴西 - 甲级联赛", "巴西甲组联赛")],
+            team_pairs=[("桑托斯足球俱乐部", "山度士SP"), ("帕尔梅拉斯", "彭美拉斯SP")],
+        )
+        results = rank_candidates(
+            [pinnacle_event(home="桑托斯足球俱乐部", away="帕尔梅拉斯", league="巴西 - 甲级联赛")],
+            [crown_event(home="山度士SP", away="彭美拉斯SP", league="巴西甲组联赛")],
+            aliases=aliases,
+        )
+        candidate = results["p-100"][0]
+        self.assertTrue(candidate["aliasHit"])
+        self.assertEqual(candidate["confidence"], "high")
+        self.assertGreater(candidate["score"], 90)
+        self.assertIn("命中已确认的名称别名", candidate["reasons"])
+
+    def test_alias_index_does_not_match_unrelated_team(self):
+        aliases = build_alias_index(team_pairs=[("桑托斯足球俱乐部", "山度士SP")])
+        results = rank_candidates(
+            [pinnacle_event(home="桑托斯足球俱乐部", away="帕尔梅拉斯", league="英格兰超级联赛")],
+            [crown_event(home="弗拉门戈", away="科林蒂安", league="西班牙甲级联赛")],
+            aliases=aliases,
+        )
+        self.assertEqual(results["p-100"], [])
 
     def test_candidate_uses_team_and_context_not_equal_provider_ids(self):
         results = rank_candidates(
@@ -161,6 +207,97 @@ class CandidateRankingTests(unittest.TestCase):
         self.assertEqual(ranked["c-league-1"][0]["pinnacleLeagueId"], "p-league-1")
         self.assertEqual(ranked["c-league-2"][0]["pinnacleLeagueId"], "p-league-2")
         self.assertIn("组内有 1 场赛事候选吻合", ranked["c-league-1"][0]["reasons"])
+
+
+    def test_league_candidates_use_country_and_event_count(self):
+        pinnacle = []
+        crown = []
+        for index in range(7):
+            pinnacle.append(pinnacle_event(
+                event_id=f"p-egy-{index}", home=f"埃及主队{index}", away=f"埃及客队{index}",
+                league="埃及 - 第二甲级联赛", league_id="p-egy-2",
+            ))
+            crown.append(crown_event(
+                event_id=f"c-egy-{index}", home=f"另一主队{index}", away=f"另一客队{index}",
+                league="埃及乙组联赛A", league_id="c-egy-2",
+            ))
+
+        ranked = rank_league_candidates(pinnacle, crown)
+        candidate = ranked["c-egy-2"][0]
+
+        self.assertEqual(candidate["pinnacleLeagueId"], "p-egy-2")
+        self.assertGreaterEqual(candidate["score"], 85)
+        self.assertIn("同一国家（埃及）", candidate["reasons"])
+        self.assertIn("赛事数量一致（7 场）", candidate["reasons"])
+
+    def test_league_candidates_skip_a_known_country_mismatch(self):
+        pinnacle = [
+            pinnacle_event(event_id="p-eg", league="埃及 - 第二甲级联赛", league_id="p-eg"),
+            pinnacle_event(event_id="p-cr", league="克罗地亚 - 乙级联赛", league_id="p-cr"),
+        ]
+        crown = [
+            crown_event(event_id="c-eg", league="埃及乙组联赛A", league_id="c-eg"),
+            crown_event(event_id="c-cr", league="克罗地亚乙组联赛", league_id="c-cr"),
+        ]
+
+        ranked = rank_league_candidates(pinnacle, crown)
+
+        self.assertEqual(ranked["c-eg"][0]["pinnacleLeagueId"], "p-eg")
+        self.assertNotIn("p-cr", [item["pinnacleLeagueId"] for item in ranked["c-eg"]])
+        self.assertEqual(ranked["c-cr"][0]["pinnacleLeagueId"], "p-cr")
+
+
+class CompetitionClassTests(unittest.TestCase):
+    def test_youth_reserve_and_womens_leagues_are_not_the_senior_league(self):
+        self.assertTrue(competition_conflict("土耳其超级联赛", "土耳其 - 超级联赛U19"))
+        self.assertTrue(competition_conflict("南非超级联赛", "南非 - 女子超级联赛"))
+        self.assertTrue(competition_conflict("波兰乙组联赛", "波兰 - 乙级联赛（女子）"))
+        self.assertTrue(competition_conflict("阿根廷后备联赛", "阿根廷 - 甲级联赛"))
+        self.assertFalse(competition_conflict("巴西甲组联赛", "巴西 - 甲级联赛"))
+        self.assertFalse(competition_conflict("英格兰女子甲组联赛", "英格兰 - 全国女子甲级联赛"))
+        self.assertFalse(
+            competition_conflict("欧洲青年联赛U19", "欧足联 - U19青年联赛")
+        )
+
+    def test_profile_reports_gender_age_and_squad(self):
+        profile = competition_profile("土耳其 - 超级联赛U19（女子）")
+        self.assertEqual(profile["age"], "youth")
+        self.assertEqual(profile["gender"], "women")
+        self.assertEqual(competition_profile("土耳其 - 超级联赛")["age"], "senior")
+
+    def test_namesakes_in_a_different_competition_are_not_suggested(self):
+        results = rank_candidates(
+            [pinnacle_event(
+                home="科尼亚体育", away="加拉塔萨雷",
+                league="土耳其 - 超级联赛U19", kickoff="2026-10-30 20:00:00",
+            )],
+            [crown_event(
+                home="科尼亚体育", away="加拉塔萨雷",
+                league="土耳其超级联赛", start="10-30 01:00p",
+            )],
+        )
+        self.assertEqual(results["p-100"], [])
+
+    def test_pair_guard_names_the_reason(self):
+        crown = prepare_crown_event(crown_event(
+            home="科尼亚体育", away="加拉塔萨雷",
+            league="土耳其超级联赛", start="10-30 01:00p",
+        ))
+        youth = prepare_pinnacle_event(pinnacle_event(
+            home="科尼亚体育", away="加拉塔萨雷",
+            league="土耳其 - 超级联赛U19", kickoff="2026-10-30 20:00:00",
+        ))
+        same_league_late = prepare_pinnacle_event(pinnacle_event(
+            home="科尼亚体育", away="加拉塔萨雷",
+            league="土耳其 - 超级联赛", kickoff="2026-10-31 01:00:00",
+        ))
+        self.assertEqual(fixture_pair_problem(crown, youth), "competition")
+        self.assertIsNone(fixture_pair_problem(crown, same_league_late))
+        early = prepare_pinnacle_event(pinnacle_event(
+            home="科尼亚体育", away="加拉塔萨雷",
+            league="土耳其 - 超级联赛", kickoff="2026-10-30 18:00:00",
+        ))
+        self.assertEqual(fixture_pair_problem(crown, early), "kickoff")
 
 
 class FixtureMergeStoreTests(unittest.TestCase):

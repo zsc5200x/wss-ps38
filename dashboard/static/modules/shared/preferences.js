@@ -38,8 +38,8 @@ export function loadSettingsPreferences() {
   state.historyHours = [1, 6, 24, 168, 720].includes(
     Number(readPreference(SETTINGS_PREF_KEYS.history, "24"))
   ) ? Number(readPreference(SETTINGS_PREF_KEYS.history, "24")) : 24;
-  const requestedLimit = Number(readPreference(SETTINGS_PREF_KEYS.changeLimit, "8"));
-  state.changeLimit = [8, 12, 24].includes(requestedLimit) ? requestedLimit : 8;
+  const requestedLimit = Number(readPreference(SETTINGS_PREF_KEYS.changeLimit, "20"));
+  state.changeLimit = [8, 12, 20, 24].includes(requestedLimit) ? requestedLimit : 20;
   return page;
 }
 
@@ -61,5 +61,5 @@ export function saveSettingsPreferences() {
   writePreference(SETTINGS_PREF_KEYS.sort, dom.settingsDefaultSort?.value || "stable");
   writePreference(SETTINGS_PREF_KEYS.filter, dom.settingsDefaultFilter?.value || "all");
   writePreference(SETTINGS_PREF_KEYS.history, dom.settingsDefaultHistory?.value || "24");
-  writePreference(SETTINGS_PREF_KEYS.changeLimit, dom.settingsChangeLimit?.value || "8");
+  writePreference(SETTINGS_PREF_KEYS.changeLimit, dom.settingsChangeLimit?.value || "20");
 }
