@@ -48,6 +48,12 @@ DEFAULTS: Dict[str, Any] = {
     "presence_interval_seconds": 5,
     "snapshot_interval_seconds": 2,
     "capture_rotation_mb": 0,
+    # Raw frame retention is opt-in by size/time.  A mode other than ``raw``
+    # stores decoded JSON where possible and avoids duplicating the payload
+    # string in the capture log.
+    "capture_mode": "raw",
+    "capture_retention_hours": 0,
+    "capture_max_bytes": 0,
     "partner_orders_db_path": "var/db/partner_orders.sqlite3",
     "partner_backend_url": "https://www.ps38ag.com/partner-ui-v2/report-outstanding-v2",
     "partner_agents": ["TLH0R02", "TLH0R03", "TLH0R04", "TLH0R28"],
@@ -59,6 +65,7 @@ DEFAULTS: Dict[str, Any] = {
     "telegram_bot_token": "",
     "telegram_chat_id": "",
     "telegram_proxy": "",
+    "dashboard_api_token": "",
 }
 
 # The first nonempty alias wins; source-specific overrides precede shared ones.
@@ -84,6 +91,9 @@ ENV_OVERRIDES = {
     "crown_port": ("CROWN_PORT",),
     "dashboard_url": ("CAPTURE_DASHBOARD_URL",),
     "presence_interval_seconds": ("CAPTURE_PRESENCE_INTERVAL_SECONDS",),
+    "capture_mode": ("CAPTURE_MODE",),
+    "capture_retention_hours": ("CAPTURE_RETENTION_HOURS",),
+    "capture_max_bytes": ("CAPTURE_MAX_BYTES",),
     "partner_orders_db_path": ("PARTNER_ORDERS_DB_PATH",),
     "partner_backend_url": ("PARTNER_BACKEND_URL",),
     "partner_agents": ("PARTNER_AGENTS",),
@@ -93,6 +103,7 @@ ENV_OVERRIDES = {
     "telegram_bot_token": ("TELEGRAM_BOT_TOKEN",),
     "telegram_chat_id": ("TELEGRAM_CHAT_ID",),
     "telegram_proxy": ("TELEGRAM_PROXY",),
+    "dashboard_api_token": ("DASHBOARD_API_TOKEN",),
 }
 
 PATH_ALIASES = {

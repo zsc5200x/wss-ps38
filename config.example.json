@@ -37,5 +37,8 @@
   "presence_interval_seconds": 5,
   "targets": {},
   "snapshot_interval_seconds": 2,
-  "capture_rotation_mb": 512
+  "capture_rotation_mb": 512,
+  "capture_mode": "raw",
+  "capture_retention_hours": 168,
+  "capture_max_bytes": 5368709120
 }

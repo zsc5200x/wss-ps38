@@ -43,6 +43,7 @@ from maintenance import backup_database, verify_database
 import partner_orders
 from project_config import DEFAULTS, config_path, get_path, load_config, service_url
 from telegram_push import TelegramPusher, list_chats
+from dashboard.capture_status import read_capture_status
 
 
 # Compatibility exports: callers may keep importing the historical root module.
@@ -66,6 +67,20 @@ HISTORY_QUERY_LIMIT_MAX = 10000
 HISTORY_QUERY_HOURS_MAX = 24 * 365
 
 BEIJING = timezone(timedelta(hours=8))
+
+
+def _is_loopback_host(host: str) -> bool:
+    """Return whether a bind address is local-only."""
+    return str(host).strip().lower() in {"127.0.0.1", "localhost", "::1"}
+
+
+def _configured_api_token(config: Dict[str, Any]) -> str:
+    """Read the dashboard token without ever exposing it in a response."""
+    return str(
+        os.environ.get("DASHBOARD_API_TOKEN")
+        or config.get("dashboard_api_token")
+        or ""
+    ).strip()
 
 
 def _parse_day(value: str, *, end: bool = False, tz_minutes: int = 480):
@@ -617,6 +632,37 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.partner_orders_path = getattr(server, "partner_orders_path", None)
             self.telegram_runner = getattr(server, "telegram_runner", None)
         super().__init__(request, client_address, server)
+
+    def _authorized(self, *, write: bool = False) -> bool:
+        """Authenticate API requests when the server is configured for it.
+
+        Test and embedded servers created directly with ``ThreadingHTTPServer``
+        have no auth attributes and retain the historical local behavior.
+        Production servers created by ``build_server`` set these attributes.
+        """
+        if not getattr(self.server, "dashboard_auth_enabled", False):
+            return True
+        expected = str(getattr(self.server, "dashboard_api_token", "") or "")
+        supplied = self.headers.get("X-API-Token", "").strip()
+        authorization = self.headers.get("Authorization", "")
+        if not supplied and authorization.lower().startswith("bearer "):
+            supplied = authorization[7:].strip()
+        if expected and supplied and supplied == expected:
+            return True
+        # A browser request with a matching same-origin Origin is accepted only
+        # when no token was configured; token-protected deployments must use a
+        # header so a cross-site form cannot mutate settings.
+        if not expected and write:
+            origin = self.headers.get("Origin", "").rstrip("/")
+            host = self.headers.get("Host", "")
+            if origin in {f"http://{host}", f"https://{host}"}:
+                return True
+        self.send_json(
+            {"ok": False, "error": "需要有效的 API Token"},
+            status=401,
+            extra_headers={"WWW-Authenticate": "Bearer"},
+        )
+        return False
 
     def _settings_response(self) -> Dict[str, Any]:
         with self.config_lock:
@@ -1548,8 +1594,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
         payload.update({"ok": True, "message": "测试消息已发送，请查看群聊"})
         self.send_json(payload)
 
+    def _capture_status(self) -> None:
+        payload = read_capture_status(get_path(self.config, "run_dir") / "capture.status.json")
+        self.send_json(payload, status=200 if payload.get("ok") else 503)
+
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
+        if parsed.path.startswith("/api/") and not self._authorized():
+            return
         if is_crown_path(parsed.path):
             proxy_crown(self, "GET")
             return
@@ -1571,6 +1623,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/telegram/status":
             self._telegram_status()
+            return
+        if parsed.path == "/api/capture/status":
+            self._capture_status()
             return
         if parsed.path == "/api/telegram/chats":
             self._telegram_chats()
@@ -1639,6 +1694,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_PUT(self) -> None:
         parsed = urlsplit(self.path)
+        if not self._authorized(write=True):
+            return
         if parsed.path == "/api/settings":
             self._update_settings()
             return
@@ -1646,6 +1703,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlsplit(self.path)
+        if parsed.path.startswith("/api/") and not self._authorized(write=True):
+            return
         if is_crown_path(parsed.path):
             proxy_crown(self, "POST")
             return
@@ -1752,6 +1811,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         parsed = urlsplit(self.path)
+        if parsed.path.startswith("/api/") and not self._authorized(write=True):
+            return
         if is_crown_path(parsed.path):
             proxy_crown(self, "DELETE")
             return
@@ -1772,7 +1833,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             raise ValueError("请求体必须是 JSON 对象")
         return payload
 
-    def send_json(self, payload: Dict[str, Any], status: int = 200) -> None:
+    def send_json(self, payload: Dict[str, Any], status: int = 200,
+                  extra_headers: Optional[Dict[str, str]] = None) -> None:
         data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
             "utf-8"
         )
@@ -1780,6 +1842,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(data)
 
@@ -1854,8 +1918,15 @@ class DashboardServer(ThreadingHTTPServer):
 
 def build_server(host: str, port: int, config: Dict[str, Any]) -> ThreadingHTTPServer:
     # Reserve the port before starting writers or capture tailers.
+    api_token = _configured_api_token(config)
+    if not _is_loopback_host(host) and not api_token:
+        raise RuntimeError(
+            "Dashboard 绑定到非本机地址时必须配置 DASHBOARD_API_TOKEN"
+        )
     server = DashboardServer((host, port), DashboardHandler)
     server.dashboard_config = dict(config)
+    server.dashboard_api_token = api_token
+    server.dashboard_auth_enabled = bool(api_token) or not _is_loopback_host(host)
     server.config_lock = threading.RLock()
     server.partner_orders_path = get_path(config, "partner_orders_db_path")
     try:

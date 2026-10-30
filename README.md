@@ -97,6 +97,9 @@ DASHBOARD_PORT=8788 CROWN_PORT=8888 ./start.sh
 | `partner_settled_interval_seconds` | `PARTNER_SETTLED_INTERVAL_SECONDS` | SETTLED 回查间隔，默认 `300` |
 | `run_dir / log_dir / backup_dir` | `RUN_DIR / LOG_DIR / BACKUP_DIR` | PID、日志与备份目录 |
 | `crown_data_dir` | `CROWN_DATA_DIR` | 皇冠账号、加密会话与缓存目录 |
+| `capture_mode` | `CAPTURE_MODE` | `raw` 保存完整帧，`parsed` 保存 JSON，`metadata` 不保存载荷 |
+| `capture_retention_hours` | `CAPTURE_RETENTION_HOURS` | 轮转采集文件的最长保留时间，`0` 不按时间删除 |
+| `capture_max_bytes` | `CAPTURE_MAX_BYTES` | 轮转采集文件总大小上限，`0` 不按大小删除 |
 
 旧配置 `fixture_merge_db_path`、`events_path`、`output`、`latest_output`、`normalized_output` 仍可读取；新配置使用规范字段。内置默认值继续兼容原根目录数据、`.run/`、`logs/` 和 `crown/data/`，复制新示例不会自动迁移旧数据。
 
@@ -112,6 +115,8 @@ DASHBOARD_PORT=8788 CROWN_PORT=8888 ./start.sh
 平台 ID 属于各自编号空间，不能直接相等匹配。人工联赛和赛事映射保存在 `merge_db_path` 指定的 SQLite 中，不改写两家原始赛事。匹配逻辑默认将平博 `Asia/Shanghai` 与皇冠 `America/New_York` 转换到具体时刻比较，再以北京时间显示。站点时区不同可设置 `PS3838_EVENT_TIMEZONE`、`CROWN_EVENT_TIMEZONE` 和 `MERGE_DISPLAY_TIMEZONE`。
 
 皇冠列表与附加盘有不同刷新节奏；前端读到缓存时会显示最后成功时间。数据时间不变化时应检查来源状态与日志，不能把“服务已启动”视为采集成功。
+
+采集器会将不含载荷的状态快照写入 `run_dir/capture.status.json`，其中包含 WebSocket 连接数、最近帧时间、写盘时间、写入队列、丢帧和写入错误计数。状态文件不包含账号、Cookie 或 WSS 消息内容。
 
 ## 项目结构
 

@@ -73,6 +73,19 @@ def _load_settings():
     except (TypeError, ValueError):
         presence_interval = 5.0
 
+    mode = str(config.get("capture_mode") or "raw").strip().lower()
+    if mode not in {"raw", "parsed", "metadata"}:
+        mode = "raw"
+    try:
+        retention_hours = max(0.0, float(config.get("capture_retention_hours") or 0))
+    except (TypeError, ValueError):
+        retention_hours = 0.0
+    try:
+        max_bytes = max(0, int(config.get("capture_max_bytes") or 0))
+    except (TypeError, ValueError):
+        max_bytes = 0
+    status_path = get_path(config, "run_dir") / "capture.status.json"
+
     return {
         "cdp_url": str(cdp_url),
         "output": output_path,
@@ -80,6 +93,10 @@ def _load_settings():
         "rotation_mb": rotation_mb,
         "dashboard_url": str(dashboard_url).rstrip("/"),
         "presence_interval": presence_interval,
+        "mode": mode,
+        "retention_hours": retention_hours,
+        "max_bytes": max_bytes,
+        "status_path": status_path,
     }
 
 
@@ -90,6 +107,10 @@ TARGET_HOSTS = SETTINGS["target_hosts"]
 ROTATION_MB = SETTINGS["rotation_mb"]
 DASHBOARD_URL = SETTINGS["dashboard_url"]
 PRESENCE_INTERVAL = SETTINGS["presence_interval"]
+CAPTURE_MODE = SETTINGS["mode"]
+RETENTION_HOURS = SETTINGS["retention_hours"]
+MAX_CAPTURE_BYTES = SETTINGS["max_bytes"]
+STATUS_PATH = SETTINGS["status_path"]
 try:
     STALE_RELOAD_SECONDS = max(60.0, float(os.environ.get("CAPTURE_STALE_RELOAD_SECONDS", "600")))
 except ValueError:
@@ -102,6 +123,16 @@ write_errors = 0
 dropped_frames = 0
 last_no_page_notice = None
 last_odds_at = 0.0
+last_frame_at = None
+last_write_at = None
+last_ws_created_at = None
+last_ws_closed_at = None
+active_sockets = set()
+pages_seen = 0
+login_status = "unknown"
+_status_lock = threading.Lock()
+_last_status_publish = 0.0
+_last_prune_at = 0.0
 
 # CDP callbacks run on the Playwright event loop.  Writing and flushing a
 # complete JSON line from that callback can stall frame delivery when the
@@ -141,13 +172,15 @@ def _capture_writer_loop():
 
 
 def _write_batch(records):
-    global write_errors
+    global write_errors, last_write_at
     try:
         OUT.parent.mkdir(parents=True, exist_ok=True)
         rotate_output_if_needed()
         with OUT.open("a", encoding="utf-8") as output_file:
             output_file.write("".join(records))
             output_file.flush()
+            last_write_at = stamp()
+        _prune_capture_files()
     except OSError as exc:
         write_errors += 1
         print(f"[写入失败 #{write_errors}] {OUT}: {exc}", flush=True)
@@ -192,6 +225,88 @@ def stamp():
     return datetime.now().astimezone().isoformat(timespec="milliseconds")
 
 
+def capture_status():
+    """Return collector health without exposing frame contents or credentials."""
+    with _status_lock:
+        return {
+            "ok": True,
+            "mode": CAPTURE_MODE,
+            "output": str(OUT),
+            "connected": bool(active_sockets),
+            "activeSockets": len(active_sockets),
+            "lastWsCreatedAt": last_ws_created_at,
+            "lastWsClosedAt": last_ws_closed_at,
+            "lastFrameAt": last_frame_at,
+            "lastWriteAt": last_write_at,
+            "queueDepth": _write_queue.qsize(),
+            "queueCapacity": _write_queue.maxsize,
+            "droppedFrames": dropped_frames,
+            "writeErrors": write_errors,
+            "pagesSeen": pages_seen,
+            "loginStatus": login_status,
+        }
+
+
+def _publish_capture_status(force=False):
+    """Persist a small, credential-free status snapshot for the dashboard."""
+    global _last_status_publish
+    now = time.monotonic()
+    if not force and now - _last_status_publish < 1.0:
+        return
+    _last_status_publish = now
+    try:
+        STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        temporary = STATUS_PATH.with_suffix(STATUS_PATH.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(capture_status(), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(STATUS_PATH)
+    except OSError:
+        # Status reporting must never interrupt frame capture.
+        pass
+
+
+def _prune_capture_files(force=False):
+    """Apply configured age/size retention to rotated capture files only."""
+    global _last_prune_at
+    if not RETENTION_HOURS and not MAX_CAPTURE_BYTES:
+        return
+    now = time.monotonic()
+    if not force and now - _last_prune_at < 60:
+        return
+    _last_prune_at = now
+    try:
+        candidates = sorted(
+            (path for path in OUT.parent.glob(f"{OUT.stem}-*{OUT.suffix}") if path.is_file()),
+            key=lambda path: path.stat().st_mtime,
+        )
+    except OSError:
+        return
+    cutoff = time.time() - RETENTION_HOURS * 3600 if RETENTION_HOURS else None
+    sizes = []
+    for path in candidates:
+        try:
+            stat = path.stat()
+            if cutoff is not None and stat.st_mtime < cutoff:
+                path.unlink()
+                continue
+            sizes.append((path, stat.st_size))
+        except OSError:
+            continue
+    if MAX_CAPTURE_BYTES:
+        total = sum(size for _path, size in sizes)
+        for path, size in sizes:
+            if total <= MAX_CAPTURE_BYTES:
+                break
+            try:
+                path.unlink()
+                total -= size
+            except OSError:
+                continue
+    _publish_capture_status()
+
+
 def is_target_host(host):
     host = (host or "").lower().rstrip(".")
     return any(
@@ -201,13 +316,27 @@ def is_target_host(host):
 
 
 def on_created(event):
+    global last_ws_created_at
     request_id = event.get("requestId", "")
     page_url = event.get("url", "")
     parsed = urlsplit(page_url)
     socket_urls[request_id] = (
         f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
     )
+    active_sockets.add(request_id)
+    last_ws_created_at = stamp()
+    _publish_capture_status()
     print("[WSS]", socket_urls[request_id], flush=True)
+
+
+def on_closed(event):
+    """Track socket closure without retaining request IDs forever."""
+    global last_ws_closed_at
+    request_id = event.get("requestId", "")
+    active_sockets.discard(request_id)
+    socket_urls.pop(request_id, None)
+    last_ws_closed_at = stamp()
+    _publish_capture_status(force=True)
 
 
 def rotate_output_if_needed():
@@ -234,7 +363,7 @@ def rotate_output_if_needed():
 
 
 def on_received(event):
-    global count, write_errors, dropped_frames, last_odds_at
+    global count, write_errors, dropped_frames, last_odds_at, last_frame_at, login_status
     count += 1
 
     frame = event.get("response") or {}
@@ -250,6 +379,15 @@ def on_received(event):
         "opcode": opcode,
         "payload": payload,
     }
+
+    last_frame_at = record["captured_at"]
+    if CAPTURE_MODE == "parsed":
+        try:
+            record["payload"] = json.loads(payload)
+        except (ValueError, TypeError):
+            record["payload"] = None
+    elif CAPTURE_MODE == "metadata":
+        record.pop("payload", None)
 
     serialized = json.dumps(record, ensure_ascii=False) + "\n"
     _ensure_capture_writer()
@@ -270,6 +408,10 @@ def on_received(event):
 
     if data and data.get("type") == "UPDATE_ODDS":
         last_odds_at = time.monotonic()
+
+    if data and data.get("type") in {"LOGIN", "AUTHENTICATED"}:
+        login_status = "authenticated"
+    _publish_capture_status()
 
     print(
         f"[{count}] opcode={opcode} "
@@ -576,6 +718,7 @@ async def attach_page(context, page):
     try:
         session = await context.new_cdp_session(page)
         session.on("Network.webSocketCreated", on_created)
+        session.on("Network.webSocketClosed", on_closed)
         session.on("Network.webSocketFrameReceived", on_received)
         await session.send("Network.enable")
         sessions[page] = session
@@ -585,7 +728,7 @@ async def attach_page(context, page):
 
 
 async def main():
-    global last_no_page_notice, last_odds_at
+    global last_no_page_notice, last_odds_at, pages_seen, login_status
     last_presence_state = None
     next_presence_at = 0.0
     next_watchdog_at = time.monotonic() + 60
@@ -621,6 +764,10 @@ async def main():
                     host = urlsplit(page.url).hostname or ""
                     if is_target_host(host):
                         target_pages.append((context, page))
+
+            pages_seen = len(target_pages)
+            login_status = "page-present" if target_pages else "no-target-page"
+            _publish_capture_status()
 
             for context, page in target_pages:
                 if page not in sessions:

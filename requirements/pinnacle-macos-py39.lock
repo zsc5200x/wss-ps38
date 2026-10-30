@@ -1,5 +1,6 @@
 # Existing verified macOS runtime snapshot; regenerate only after checks pass.
 greenlet==3.2.5
 playwright==1.60.0
+websockets==16.0
 pyee==13.0.1
 typing_extensions==4.16.0
